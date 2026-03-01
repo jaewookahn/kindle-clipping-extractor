@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 출력 파일
+*.json
+*.csv
+outputs/
+logs/
+
+# macOS
+.DS_Store
+
+# 에디터
+.idea/
+.vscode/
+*.swp
