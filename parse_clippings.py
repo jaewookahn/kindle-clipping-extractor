@@ -1205,6 +1205,8 @@ def main():
                 else:
                     print(f"  [warn] Text extraction failed for {ebook.name}", file=sys.stderr)
 
+    clippings.sort(key=lambda c: c.added_date or "")
+
     if fmt == "json":
         export_json(clippings, apnx_infos, out_path)
     elif fmt == "csv":
