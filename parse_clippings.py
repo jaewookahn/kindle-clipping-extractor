@@ -439,13 +439,13 @@ def _yjr_location(pos_str: str) -> Optional[int]:
 
 
 def _yjr_timestamp(raw8: bytes) -> Optional[str]:
-    """Decode 8-byte big-endian ms-since-epoch to ISO-8601 UTC string."""
+    """Decode 8-byte big-endian ms-since-epoch to local-time string."""
     try:
         ms = int.from_bytes(raw8, "big")
         if ms == 0 or ms > 4_000_000_000_000:
             return None
-        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (OSError, OverflowError, ValueError):
         return None
 
