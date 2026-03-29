@@ -80,3 +80,23 @@ def scan_path(input_path: Path) -> tuple[List[Clipping], List[APNXInfo]]:
             print(f"  [warn] Failed to parse {f}: {exc}", file=sys.stderr)
 
     return clippings, apnx_infos
+
+
+def list_books(clippings: List[Clipping]) -> List[dict]:
+    """Return a sorted list of unique books found in the clippings.
+
+    Each entry is a dict with keys:
+      - ``title``  : book title
+      - ``author`` : author (empty string if unknown)
+      - ``count``  : number of clippings for that book
+    """
+    seen: dict[tuple[str, str], int] = {}
+    for c in clippings:
+        key = (c.book_title, c.author)
+        seen[key] = seen.get(key, 0) + 1
+
+    return sorted(
+        [{"title": title, "author": author, "count": count}
+         for (title, author), count in seen.items()],
+        key=lambda b: b["title"].lower(),
+    )

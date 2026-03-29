@@ -1,6 +1,7 @@
 """Command-line interface for the Kindle clippings parser."""
 
 import argparse
+import platform
 import sys
 from pathlib import Path
 
@@ -14,58 +15,18 @@ from kindle.ebook import (
     fill_clipping_kindle_locations,
 )
 from kindle.exporters import export_json, export_csv, export_markdown, export_text
-from kindle.scanner import scan_path
+from kindle.scanner import scan_path, list_books
+from kindle.device import (
+    find_kindle, print_device_books, print_mtp_books,
+    list_device_clippings_file, mtp_mount, mtp_direct_session,
+    _find_fuse_mtp_tool, _load_libmtp,
+)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Parse Kindle/Mobipocket clippings and export them.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument(
-        "input",
-        help="Input file or directory to scan (My Clippings.txt, *.mbp, *.apnx)",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        required=True,
-        help="Output file path",
-    )
-    parser.add_argument(
-        "-f", "--format",
-        choices=["json", "csv", "markdown", "text"],
-        default=None,
-        help="Output format (default: inferred from output file extension)",
-    )
-    parser.add_argument(
-        "--ebook",
-        default=None,
-        metavar="EBOOK",
-        help="Ebook file (KFX, AZW3, MOBI, EPUB …) to extract highlight text and "
-             "page numbers from.  If omitted, the script tries to auto-detect a "
-             "sibling ebook next to every .sdr folder it finds.",
-    )
-    parser.add_argument(
-        "--no-text",
-        action="store_true",
-        help="Skip highlight text extraction (useful if Calibre is slow or unavailable).",
-    )
-    parser.add_argument(
-        "--no-pages",
-        action="store_true",
-        help="Skip page-number extraction (requires KFX Input Calibre plugin).",
-    )
-    args = parser.parse_args()
-
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"Error: input not found: {input_path}", file=sys.stderr)
-        sys.exit(1)
-
+def _export_from_path(input_path: Path, args) -> None:
+    """Parse clippings at *input_path* and write them to args.output."""
     out_path = Path(args.output)
 
-    # Infer format from extension if not specified
     fmt = args.format
     if fmt is None:
         ext_map = {".json": "json", ".csv": "csv", ".md": "markdown", ".txt": "text"}
@@ -76,10 +37,7 @@ def main():
     clippings, apnx_infos = scan_path(input_path)
     print(f"Found {len(clippings)} clippings, {len(apnx_infos)} APNX page indexes")
 
-    # --- Text extraction + page number population ---
     ebook_override = Path(args.ebook) if args.ebook else None
-
-    # Group YJR/YJF clippings by their .sdr parent so we can find the paired ebook.
     sdr_to_clippings: dict[Path, list] = {}
     for c in clippings:
         src = Path(c.source_file)
@@ -87,8 +45,6 @@ def main():
         if sdr:
             sdr_to_clippings.setdefault(sdr, []).append(c)
 
-    # If no .sdr groupings (e.g. My Clippings.txt only) but --ebook was given,
-    # apply text extraction to all clippings.
     if not sdr_to_clippings and ebook_override:
         sdr_to_clippings[Path(".")] = clippings
 
@@ -102,9 +58,6 @@ def main():
             continue
 
         if ebook.suffix.lower() == ".kfx":
-            # For KFX files: use kfxlib for text, pages, and Kindle Locations in one pass.
-            # kfxlib preserves the exact KFX internal char offsets used by YJR annotations,
-            # whereas Calibre's ebook-convert introduces position drift.
             print(f"  Extracting text, page map, and Kindle Locations from: {ebook.name} …")
             page_map, kl_offsets, book_text = extract_kfx_info(ebook)
 
@@ -116,14 +69,12 @@ def main():
             elif not args.no_text:
                 print(f"  [warn] Text extraction failed for {ebook.name}", file=sys.stderr)
 
-            # fill_clipping_pages must use char offsets → call before KL conversion
             if not args.no_pages and page_map:
                 fill_clipping_pages(group, page_map)
                 paged = sum(1 for c in group if c.page is not None)
                 print(f"  Assigned page numbers to {paged} clippings "
                       f"(pp. {page_map[0][0]}–{page_map[-1][0]})")
 
-            # Convert char offsets → Kindle Location numbers for display
             if not args.no_pages and kl_offsets:
                 fill_clipping_kindle_locations(group, kl_offsets)
                 print(f"  Converted locations to Kindle Location numbers "
@@ -132,8 +83,6 @@ def main():
                 print(f"  [info] No location map found in {ebook.name} (plugin may be missing)")
 
         else:
-            # For non-KFX formats: use Calibre's ebook-convert for text extraction.
-            # Page numbers and Kindle Locations are not available for these formats.
             if not args.no_text:
                 print(f"  Extracting highlight text from: {ebook.name} …")
                 book_text = extract_book_text(ebook)
@@ -155,3 +104,192 @@ def main():
         export_markdown(clippings, out_path)
     elif fmt == "text":
         export_text(clippings, out_path)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Parse Kindle/Mobipocket clippings and export them.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Input file or directory to scan (My Clippings.txt, *.mbp, *.apnx). "
+             "Optional when --device is used.",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=None,
+        help="Output file path (required unless --list-books or --device is used)",
+    )
+    parser.add_argument(
+        "--device",
+        action="store_true",
+        help="Auto-detect a connected Kindle device and list its books and clippings.",
+    )
+    parser.add_argument(
+        "--mtp",
+        action="store_true",
+        help="Access Kindle via MTP. "
+             "Linux: uses jmtpfs FUSE mount (apt install jmtpfs). "
+             "macOS: falls back to libmtp CLI (brew install libmtp). "
+             "On macOS, Kindle usually auto-mounts — try --device first.",
+    )
+    parser.add_argument(
+        "--mtp-mountpoint",
+        default=None,
+        metavar="DIR",
+        help="Directory to use as the MTP mount point (default: auto temp dir).",
+    )
+    parser.add_argument(
+        "-f", "--format",
+        choices=["json", "csv", "markdown", "text"],
+        default=None,
+        help="Output format (default: inferred from output file extension)",
+    )
+    parser.add_argument(
+        "--ebook",
+        default=None,
+        metavar="EBOOK",
+        help="Ebook file (KFX, AZW3, MOBI, EPUB …) to extract highlight text and "
+             "page numbers from.  If omitted, the script tries to auto-detect a "
+             "sibling ebook next to every .sdr folder it finds.",
+    )
+    parser.add_argument(
+        "--export-all",
+        action="store_true",
+        help="Export ALL clippings from every book on the device (.yjr/.yjf/.mbp + "
+             "My Clippings.txt). Use with --device or --mtp and -o.",
+    )
+    parser.add_argument(
+        "--list-books",
+        action="store_true",
+        help="Print a list of books found in the input and exit (no output file written).",
+    )
+    parser.add_argument(
+        "--no-text",
+        action="store_true",
+        help="Skip highlight text extraction (useful if Calibre is slow or unavailable).",
+    )
+    parser.add_argument(
+        "--no-pages",
+        action="store_true",
+        help="Skip page-number extraction (requires KFX Input Calibre plugin).",
+    )
+    args = parser.parse_args()
+
+    # --mtp: access Kindle via MTP.
+    # Priority:
+    #   1. Device already OS-mounted → filesystem directly (no MTP, no eject risk)
+    #   2. FUSE tool available (Linux) → FUSE mount
+    #   3. libmtp available → single ctypes session (one open, one close, no repeated eject)
+    if args.mtp:
+        mountpoint = Path(args.mtp_mountpoint) if args.mtp_mountpoint else None
+        try:
+            already_mounted = find_kindle()
+            if already_mounted:
+                print(f"  Kindle already mounted at {already_mounted} — using filesystem.")
+                print_device_books(already_mounted)
+                if args.output:
+                    if args.export_all:
+                        print(f"\nExporting all clippings …")
+                        _export_from_path(already_mounted / "documents", args)
+                    else:
+                        clippings_file = list_device_clippings_file(already_mounted)
+                        if clippings_file:
+                            print(f"\nExporting clippings from {clippings_file} …")
+                            _export_from_path(clippings_file, args)
+                        else:
+                            print("[warn] My Clippings.txt not found.", file=sys.stderr)
+
+            elif _find_fuse_mtp_tool():
+                with mtp_mount(mountpoint) as kindle_root:
+                    print_device_books(kindle_root)
+                    if args.output:
+                        if args.export_all:
+                            _export_from_path(kindle_root / "documents", args)
+                        else:
+                            clippings_file = list_device_clippings_file(kindle_root)
+                            if clippings_file:
+                                _export_from_path(clippings_file, args)
+
+            elif _load_libmtp():
+                # Single ctypes session: device opened once, all ops inside, closed once.
+                # No repeated detach/attach → no eject.
+                with mtp_direct_session() as session:
+                    print_mtp_books(session)
+                    if args.output:
+                        if args.export_all:
+                            print("\nDownloading all annotation files …")
+                            tmpdir = session.fetch_all_annotations()
+                            print("Exporting …")
+                            _export_from_path(tmpdir, args)
+                        else:
+                            clippings_file = session.fetch_clippings_txt()
+                            if clippings_file:
+                                print("\nExporting clippings …")
+                                _export_from_path(clippings_file, args)
+                            else:
+                                print("[warn] My Clippings.txt not found.", file=sys.stderr)
+
+            else:
+                if platform.system() == "Linux":
+                    msg = "sudo apt install libmtp-dev  or  sudo apt install jmtpfs"
+                else:
+                    msg = "brew install libmtp"
+                print(f"Error: no MTP library found. Install it:  {msg}", file=sys.stderr)
+                sys.exit(1)
+
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --device: use OS auto-mount, list books/clippings, then optionally export
+    if args.device:
+        kindle_root = find_kindle()
+        if not kindle_root:
+            print("Error: no connected Kindle device found.", file=sys.stderr)
+            sys.exit(1)
+        print_device_books(kindle_root)
+
+        if args.output:
+            if args.export_all:
+                print(f"\nExporting all clippings from {kindle_root / 'documents'} …")
+                _export_from_path(kindle_root / "documents", args)
+                return
+            clippings_file = list_device_clippings_file(kindle_root)
+            if clippings_file:
+                print(f"\nExporting clippings from {clippings_file} …")
+                args.input = str(clippings_file)
+            else:
+                return
+        else:
+            return
+
+    if not args.input:
+        parser.error("input is required unless --device is used")
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Error: input not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.list_books:
+        clippings, _ = scan_path(input_path)
+        books = list_books(clippings)
+        if not books:
+            print("No books found.")
+        else:
+            print(f"{'#':<5} {'Title':<60} {'Author':<30} Clippings")
+            print("-" * 100)
+            for i, b in enumerate(books, 1):
+                print(f"{i:<5} {b['title']:<60} {b['author']:<30} {b['count']}")
+        return
+
+    if not args.output:
+        parser.error("--output is required unless --list-books or --device is used")
+
+    _export_from_path(input_path, args)

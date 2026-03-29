@@ -8,6 +8,7 @@ venv/
 # 출력 파일
 *.json
 *.csv
+*.log
 outputs/
 logs/
 

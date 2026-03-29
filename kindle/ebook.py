@@ -114,7 +114,9 @@ def fill_clipping_text(clippings: List[Clipping], book_text: str) -> None:
         if loc_s >= len(book_text):
             continue
 
-        snippet = book_text[loc_s:min(loc_e, len(book_text))].strip()
+        # loc_end in YJR is inclusive (points to the last character of the highlight).
+        # Add 1 to convert to Python's exclusive end index.
+        snippet = book_text[loc_s:min(loc_e + 1, len(book_text))].strip()
         # Collapse internal newlines/whitespace runs to single spaces
         snippet = re.sub(r"\s+", " ", snippet)
 
