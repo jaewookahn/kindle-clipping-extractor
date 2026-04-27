@@ -47,8 +47,6 @@ import io
 import json
 import logging
 import sys
-import tempfile
-import zipfile
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
@@ -61,6 +59,7 @@ from kindle.device import find_kindle
 from kindle.models import Clipping
 from kindle.parsers.yjr import parse_yjr
 from kindle.ebook import (
+    extract_kfx_metadata,
     extract_kfx_info,
     fill_clipping_text,
     fill_clipping_pages,
@@ -211,97 +210,6 @@ def save_state(path: Path, state: dict) -> None:
 def _fingerprint(c: Clipping) -> str:
     key = f"{c.book_title}|{c.clip_type}|{c.location_start}|{c.location_end}"
     return hashlib.sha1(key.encode()).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# KFX 메타데이터 추출
-# ---------------------------------------------------------------------------
-
-_KFX_PLUGIN_PATHS = [
-    "~/Library/Preferences/calibre/plugins/KFX Input.zip",
-    "~/.config/calibre/plugins/KFX Input.zip",
-]
-
-
-def _find_kfx_plugin() -> str | None:
-    for p in _KFX_PLUGIN_PATHS:
-        expanded = Path(p).expanduser()
-        if expanded.exists():
-            return str(expanded)
-    return None
-
-
-def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
-    """
-    KFX 파일에서 책 제목·저자를 추출한다.
-    kfxlib의 get_metadata()를 시도하고, 실패 시 파일명으로 폴백.
-    """
-    fallback = {"title": kfx_path.stem, "author": ""}
-    plugin_zip = _find_kfx_plugin()
-    if not plugin_zip:
-        return fallback
-
-    tmpdir = None
-    try:
-        tmpdir = Path(tempfile.mkdtemp())
-        with zipfile.ZipFile(plugin_zip) as z:
-            for name in z.namelist():
-                if name.startswith("kfxlib/") and not name.endswith("/"):
-                    dest = tmpdir / name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(z.read(name))
-
-        if str(tmpdir) not in sys.path:
-            sys.path.insert(0, str(tmpdir))
-
-        from kfxlib import yj_book  # type: ignore
-
-        book = yj_book.YJ_Book(str(kfx_path))
-
-        # get_metadata()는 Calibre Metadata 객체 또는 유사 객체를 반환한다.
-        # Calibre 없이 kfxlib만 있을 경우 실패할 수 있으므로 예외 처리.
-        try:
-            mi = book.get_metadata()
-            title  = (getattr(mi, "title",   None) or "").strip() or kfx_path.stem
-            authors = getattr(mi, "authors", None) or []
-            author = ", ".join(a for a in authors if a and a.lower() != "unknown")
-            return {"title": title, "author": author}
-        except Exception:
-            pass
-
-        # 폴백: decode 후 fragment에서 직접 탐색
-        book.decode_book(set_metadata=None)
-        title = kfx_path.stem
-        author = ""
-
-        # KFX 메타데이터 fragment ($490) 안의 $524(title), $522(author) 심볼 탐색
-        try:
-            from kfxlib.ion import unannotated  # type: ignore
-            meta_frag = book.fragments.get("$490")
-            if meta_frag is not None:
-                for item in (meta_frag.value or []):
-                    try:
-                        d = unannotated(item)
-                        key_sym = str(d.get("$492", ""))
-                        val     = d.get("$307", "") or d.get("$171", "")
-                        if key_sym == "$524" and val:   # title
-                            title = str(val).strip()
-                        elif key_sym == "$522" and val: # author
-                            author = str(val).strip()
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-
-        return {"title": title, "author": author}
-
-    except Exception as e:
-        logger.warning("메타데이터 추출 실패 (%s): %s", kfx_path.name, e)
-        return fallback
-    finally:
-        if tmpdir:
-            import shutil
-            shutil.rmtree(str(tmpdir), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

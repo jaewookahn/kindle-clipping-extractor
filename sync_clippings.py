@@ -31,17 +31,15 @@ import hashlib
 import json
 import re
 import sys
-import tempfile
-import zipfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Set, Dict
 
-# kindle 패키지에서 마운트 감지·파싱 재사용
 from kindle.device import find_kindle, list_device_clippings_file
 from kindle.parsers.my_clippings import parse_my_clippings as _parse
 from kindle.models import Clipping
+from kindle.ebook import _find_kfx_plugin, extract_kfx_info
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +93,8 @@ def find_kfx_on_device(kindle_root: Path, book_title: str) -> Optional[Path]:
 
 
 # ---------------------------------------------------------------------------
-# KFX 텍스트 추출 + Kindle Location 맵  (recover_clippings.py 동일 로직)
+# 한도 초과 판별
 # ---------------------------------------------------------------------------
-
-_KFX_PLUGIN_PATHS = [
-    "~/Library/Preferences/calibre/plugins/KFX Input.zip",
-    "~/.config/calibre/plugins/KFX Input.zip",
-]
 
 _LIMIT_PREFIXES = (
     "<you have reached the clipping limit",
@@ -110,77 +103,10 @@ _LIMIT_PREFIXES = (
 )
 
 
-def _find_kfx_plugin() -> Optional[str]:
-    for p in _KFX_PLUGIN_PATHS:
-        expanded = Path(p).expanduser()
-        if expanded.exists():
-            return str(expanded)
-    return None
-
-
 def _is_limit_exceeded(content: str) -> bool:
     if not content or not content.strip():
         return True
     return content.strip().lower().startswith(_LIMIT_PREFIXES)
-
-
-def _extract_kfx_data(kfx_path: Path):
-    """(kindle_loc_offsets, book_text) 반환. 실패 시 (None, None)."""
-    plugin_zip = _find_kfx_plugin()
-    if not plugin_zip:
-        return None, None
-
-    tmpdir: Optional[Path] = None
-    try:
-        tmpdir = Path(tempfile.mkdtemp())
-        with zipfile.ZipFile(plugin_zip) as z:
-            for name in z.namelist():
-                if name.startswith("kfxlib/") and not name.endswith("/"):
-                    dest = tmpdir / name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(z.read(name))
-
-        if str(tmpdir) not in sys.path:
-            sys.path.insert(0, str(tmpdir))
-
-        from kfxlib import yj_book  # type: ignore
-
-        book = yj_book.YJ_Book(str(kfx_path))
-        book.decode_book(set_metadata=None)
-        pos_info = book.collect_position_map_info()
-
-        loc_info = book.collect_location_map_info(pos_info)
-        kl_offsets: Optional[List[int]] = (
-            [entry.pid for entry in loc_info] if loc_info else None
-        )
-
-        book_text: Optional[str] = None
-        try:
-            chunks = sorted(
-                [c for c in book.collect_content_position_info() if c.text],
-                key=lambda c: c.pid,
-            )
-            if chunks:
-                parts: List[str] = []
-                pos = 0
-                for c in chunks:
-                    if c.pid > pos:
-                        parts.append(" " * (c.pid - pos))
-                    parts.append(c.text)
-                    pos = c.pid + c.length
-                book_text = "".join(parts)
-        except Exception as exc:
-            print(f"    [경고] 텍스트 추출 실패: {exc}", file=sys.stderr)
-
-        return kl_offsets, book_text
-
-    except Exception as exc:
-        print(f"    [경고] KFX 파싱 실패: {exc}", file=sys.stderr)
-        return None, None
-    finally:
-        if tmpdir:
-            import shutil
-            shutil.rmtree(str(tmpdir), ignore_errors=True)
 
 
 def _recover_text(clippings: List[Clipping], kl_offsets: List[int], book_text: str) -> int:
@@ -243,7 +169,7 @@ def recover_by_book(
             print(f"  [{title[:40]}] KFX 발견: {kfx.name}")
             print(f"    → {len(needs_recovery)}개 한도 초과 항목 복구 시도 …")
 
-        kl_offsets, book_text = _extract_kfx_data(kfx)
+        _, kl_offsets, book_text = extract_kfx_info(kfx)
         if not kl_offsets or not book_text:
             if verbose:
                 print(f"    → 추출 실패", file=sys.stderr)

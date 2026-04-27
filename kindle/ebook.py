@@ -1,21 +1,15 @@
 """Calibre/KFX-based ebook text and page-map extraction."""
 
+import contextlib
 import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
-from typing import Optional, List
+from typing import Iterator, Optional, List
 
 from kindle.models import Clipping
-
-# ---------------------------------------------------------------------------
-# KFX text extraction (for resolving highlight locations to actual text)
-# ---------------------------------------------------------------------------
-#
-# Kindle location numbers in YJR annotation files are Unicode character offsets
-# into the full book text.  We use Calibre's ebook-convert to produce a plain
-# text rendition, then slice [loc_start:loc_end] to get the highlighted text.
 
 _CALIBRE_PATHS = [
     "/Applications/calibre.app/Contents/MacOS/ebook-convert",
@@ -25,6 +19,7 @@ _CALIBRE_PATHS = [
 
 _KFX_PLUGIN_PATHS = [
     "~/Library/Preferences/calibre/plugins/KFX Input.zip",
+    "~/.config/calibre/plugins/KFX Input.zip",
 ]
 
 
@@ -41,6 +36,40 @@ def _find_kfx_plugin() -> Optional[str]:
         if expanded.exists():
             return str(expanded)
     return None
+
+
+@contextlib.contextmanager
+def _kfxlib_context() -> Iterator[None]:
+    """Extract kfxlib from the Calibre KFX Input plugin zip and add it to sys.path.
+
+    Raises RuntimeError if the plugin is not found.
+    Cleans up the temp directory on exit.
+    """
+    plugin_zip = _find_kfx_plugin()
+    if not plugin_zip:
+        raise RuntimeError("Calibre KFX Input plugin not found")
+
+    tmpdir = Path(tempfile.mkdtemp())
+    try:
+        with zipfile.ZipFile(plugin_zip) as z:
+            for name in z.namelist():
+                if name.startswith("kfxlib/") and not name.endswith("/"):
+                    dest = tmpdir / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(z.read(name))
+
+        kfxlib_dir = str(tmpdir)
+        added = kfxlib_dir not in sys.path
+        if added:
+            sys.path.insert(0, kfxlib_dir)
+        try:
+            yield
+        finally:
+            if added:
+                sys.path.remove(kfxlib_dir)
+    finally:
+        import shutil
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
 
 
 def extract_book_text(ebook_path: Path) -> Optional[str]:
@@ -130,6 +159,51 @@ def fill_clipping_text(clippings: List[Clipping], book_text: str) -> None:
             c.content = color_tag + snippet
 
 
+def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
+    """Extract title and author from a KFX file. Falls back to filename on failure."""
+    fallback: dict[str, str] = {"title": kfx_path.stem, "author": ""}
+    if not _find_kfx_plugin():
+        return fallback
+    try:
+        with _kfxlib_context():
+            from kfxlib import yj_book  # type: ignore
+
+            book = yj_book.YJ_Book(str(kfx_path))
+            try:
+                mi = book.get_metadata()
+                title = (getattr(mi, "title", None) or "").strip() or kfx_path.stem
+                authors = getattr(mi, "authors", None) or []
+                author = ", ".join(a for a in authors if a and a.lower() != "unknown")
+                return {"title": title, "author": author}
+            except Exception:
+                pass
+
+            book.decode_book(set_metadata=None)
+            title = kfx_path.stem
+            author = ""
+            try:
+                from kfxlib.ion import unannotated  # type: ignore
+                meta_frag = book.fragments.get("$490")
+                if meta_frag is not None:
+                    for item in (meta_frag.value or []):
+                        try:
+                            d = unannotated(item)
+                            key_sym = str(d.get("$492", ""))
+                            val = d.get("$307", "") or d.get("$171", "")
+                            if key_sym == "$524" and val:
+                                title = str(val).strip()
+                            elif key_sym == "$522" and val:
+                                author = str(val).strip()
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            return {"title": title, "author": author}
+    except Exception as exc:
+        print(f"  [warn] extract_kfx_metadata failed ({kfx_path.name}): {exc}", file=sys.stderr)
+        return fallback
+
+
 def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[List[int]], Optional[str]]:
     """
     Extract page map, Kindle Location boundaries, and book text from a KFX file in one pass.
@@ -147,94 +221,76 @@ def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[Li
 
     Requires the Calibre "KFX Input" plugin to be installed.
     """
-    plugin_zip = _find_kfx_plugin()
-    if not plugin_zip:
+    if not _find_kfx_plugin():
         return None, None, None
 
-    import zipfile
-
-    tmpdir: Optional[Path] = None
     try:
-        tmpdir = Path(tempfile.mkdtemp())
-        with zipfile.ZipFile(plugin_zip) as z:
-            for name in z.namelist():
-                if name.startswith("kfxlib/") and not name.endswith("/"):
-                    dest = tmpdir / name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(z.read(name))
+        with _kfxlib_context():
+            from kfxlib import yj_book                               # type: ignore
+            from kfxlib.ion import unannotated, ion_type, IonSymbol  # type: ignore
 
-        kfxlib_dir = str(tmpdir)
-        if kfxlib_dir not in sys.path:
-            sys.path.insert(0, kfxlib_dir)
+            book = yj_book.YJ_Book(str(kfx_path))
+            book.decode_book(set_metadata=None)
+            pos_info = book.collect_position_map_info()
 
-        from kfxlib import yj_book                              # type: ignore
-        from kfxlib.ion import unannotated, ion_type, IonSymbol # type: ignore
-
-        book = yj_book.YJ_Book(str(kfx_path))
-        book.decode_book(set_metadata=None)
-        pos_info = book.collect_position_map_info()
-
-        # --- Kindle Location boundaries ---
-        loc_info = book.collect_location_map_info(pos_info)
-        kindle_loc_offsets: Optional[List[int]] = (
-            [entry.pid for entry in loc_info] if loc_info else None
-        )
-
-        # --- Publisher page map ---
-        page_map: List[tuple] = []
-        nav_fragment = book.fragments.get("$389")
-        if nav_fragment is not None:
-            for book_navigation in nav_fragment.value:
-                for nav_container in book_navigation.get("$392", []):
-                    if ion_type(nav_container) is IonSymbol:
-                        nav_container = book.fragments.get(ftype="$391", fid=nav_container)
-                    if nav_container is None:
-                        continue
-                    nav_container = unannotated(nav_container)
-                    if nav_container.get("$235", None) != "$237":  # $237 = page list
-                        continue
-                    for entry in nav_container.get("$247", []):
-                        ep = unannotated(entry)
-                        label = ep.get("$241", {}).get("$244", "")
-                        pos   = ep.get("$246", {})
-                        eid   = pos.get("$155")
-                        eid_offset = pos.get("$143", 0)
-                        pid = book.pid_for_eid(eid, eid_offset, pos_info)
-                        if pid is not None and label:
-                            page_map.append((label, pid))
-            page_map.sort(key=lambda x: x[1])
-
-        # --- Book text with correct KFX char offsets ---
-        # collect_content_position_info() returns ContentChunk objects where
-        # chunk.pid is the absolute char offset and chunk.text is the actual text.
-        # Building the text this way preserves the exact positions stored in YJR annotations.
-        book_text: Optional[str] = None
-        try:
-            content_chunks = book.collect_content_position_info()
-            chunks_with_text = sorted(
-                [c for c in content_chunks if c.text],
-                key=lambda c: c.pid,
+            # --- Kindle Location boundaries ---
+            loc_info = book.collect_location_map_info(pos_info)
+            kindle_loc_offsets: Optional[List[int]] = (
+                [entry.pid for entry in loc_info] if loc_info else None
             )
-            if chunks_with_text:
-                parts: List[str] = []
-                pos = 0
-                for c in chunks_with_text:
-                    if c.pid > pos:
-                        parts.append(" " * (c.pid - pos))   # fill gap
-                    parts.append(c.text)
-                    pos = c.pid + c.length
-                book_text = "".join(parts)
-        except Exception as exc:
-            print(f"  [warn] KFX text extraction failed: {exc}", file=sys.stderr)
 
-        return page_map if page_map else None, kindle_loc_offsets, book_text
+            # --- Publisher page map ---
+            page_map: List[tuple] = []
+            nav_fragment = book.fragments.get("$389")
+            if nav_fragment is not None:
+                for book_navigation in nav_fragment.value:
+                    for nav_container in book_navigation.get("$392", []):
+                        if ion_type(nav_container) is IonSymbol:
+                            nav_container = book.fragments.get(ftype="$391", fid=nav_container)
+                        if nav_container is None:
+                            continue
+                        nav_container = unannotated(nav_container)
+                        if nav_container.get("$235", None) != "$237":  # $237 = page list
+                            continue
+                        for entry in nav_container.get("$247", []):
+                            ep = unannotated(entry)
+                            label = ep.get("$241", {}).get("$244", "")
+                            pos   = ep.get("$246", {})
+                            eid   = pos.get("$155")
+                            eid_offset = pos.get("$143", 0)
+                            pid = book.pid_for_eid(eid, eid_offset, pos_info)
+                            if pid is not None and label:
+                                page_map.append((label, pid))
+                page_map.sort(key=lambda x: x[1])
+
+            # --- Book text with correct KFX char offsets ---
+            # collect_content_position_info() returns ContentChunk objects where
+            # chunk.pid is the absolute char offset and chunk.text is the actual text.
+            # Building the text this way preserves the exact positions stored in YJR annotations.
+            book_text: Optional[str] = None
+            try:
+                content_chunks = book.collect_content_position_info()
+                chunks_with_text = sorted(
+                    [c for c in content_chunks if c.text],
+                    key=lambda c: c.pid,
+                )
+                if chunks_with_text:
+                    parts: List[str] = []
+                    pos = 0
+                    for c in chunks_with_text:
+                        if c.pid > pos:
+                            parts.append(" " * (c.pid - pos))   # fill gap
+                        parts.append(c.text)
+                        pos = c.pid + c.length
+                    book_text = "".join(parts)
+            except Exception as exc:
+                print(f"  [warn] KFX text extraction failed: {exc}", file=sys.stderr)
+
+            return page_map if page_map else None, kindle_loc_offsets, book_text
 
     except Exception as exc:
         print(f"  [warn] extract_kfx_info failed: {exc}", file=sys.stderr)
         return None, None, None
-    finally:
-        import shutil
-        shutil.rmtree(str(tmpdir), ignore_errors=True)
 
 
 # Keep backward-compatible alias
