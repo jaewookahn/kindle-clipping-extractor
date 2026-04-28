@@ -69,6 +69,10 @@ from kindle.exporters import (
     sync_export_text,
     sync_export_json_grouped,
 )
+from kindle.notion_export import (
+    sync_to_notion,
+    DEFAULT_STATE as NOTION_DEFAULT_STATE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -413,32 +417,47 @@ def run_pipeline(args) -> int:
         _print_log_summary(Path(args.log))
         return 0
 
-    # ── 5. 출력 ──────────────────────────────────────────────────────────
-    out_path = Path(args.output)
-    fmt = args.format
-    if fmt is None:
-        ext_map = {".json": "json", ".csv": "csv", ".md": "markdown", ".txt": "text"}
-        fmt = ext_map.get(out_path.suffix.lower(), "json")
-
     all_new.sort(key=lambda c: (c.book_title, c.added_date or ""))
 
-    meta = {
-        "synced_at":   datetime.now().isoformat(),
-        "kindle_path": str(kindle_root),
-        "new_count":   len(all_new),
-        "book_count":  len({c.book_title for c in all_new}),
-    }
+    # ── 5a. 파일 출력 (선택) ─────────────────────────────────────────────
+    if args.output:
+        out_path = Path(args.output)
+        fmt = args.format
+        if fmt is None:
+            ext_map = {".json": "json", ".csv": "csv", ".md": "markdown", ".txt": "text"}
+            fmt = ext_map.get(out_path.suffix.lower(), "json")
 
-    if fmt == "json":
-        sync_export_json_grouped(all_new, out_path, meta)
-    elif fmt == "csv":
-        sync_export_csv(all_new, out_path)
-    elif fmt == "markdown":
-        sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑")
-    else:
-        sync_export_text(all_new, out_path)
+        meta = {
+            "synced_at":   datetime.now().isoformat(),
+            "kindle_path": str(kindle_root),
+            "new_count":   len(all_new),
+            "book_count":  len({c.book_title for c in all_new}),
+        }
 
-    print(f"저장: {out_path}")
+        if fmt == "json":
+            sync_export_json_grouped(all_new, out_path, meta)
+        elif fmt == "csv":
+            sync_export_csv(all_new, out_path)
+        elif fmt == "markdown":
+            sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑")
+        else:
+            sync_export_text(all_new, out_path)
+        print(f"저장: {out_path}")
+
+    # ── 5b. Notion 업로드 (선택) ─────────────────────────────────────────
+    if args.notion_token and args.notion_db:
+        print("\nNotion 업로드 중 …")
+        result = sync_to_notion(
+            all_new,
+            notion_token=args.notion_token,
+            database_id=args.notion_db,
+            state_path=Path(args.notion_state),
+            enable_book_cover=not args.no_cover,
+        )
+        print(
+            f"Notion 완료: 추가 {result['added']}개 / skip {result['skipped']}개"
+            f"  (신규 책 {result['books_new']}권 / 업데이트 {result['books_updated']}권)"
+        )
 
     # ── 6. 상태 업데이트 ─────────────────────────────────────────────────
     for c in all_new:
@@ -498,10 +517,26 @@ def main() -> None:
                         help="상태 파일 초기화 후 전체 재동기화")
     parser.add_argument("--list-books", action="store_true",
                         help="KFX + YJR 쌍 목록만 출력하고 종료")
+    # Notion
+    parser.add_argument("--notion-token", default=None, metavar="TOKEN",
+                        help="Notion 통합 토큰 (NOTION_TOKEN 환경변수로도 설정 가능)")
+    parser.add_argument("--notion-db", default=None, metavar="DB_ID",
+                        help="업로드할 Notion 데이터베이스 ID")
+    parser.add_argument("--notion-state", default=str(NOTION_DEFAULT_STATE), metavar="FILE",
+                        help=f"Notion 상태 파일 경로 (기본값: {NOTION_DEFAULT_STATE})")
+    parser.add_argument("--no-cover", action="store_true",
+                        help="Notion 페이지에 책 표지 추가 안 함")
     args = parser.parse_args()
 
-    if not args.dry_run and not args.list_books and not args.output:
-        parser.error("--output, --dry-run, --list-books 중 하나가 필요합니다.")
+    # NOTION_TOKEN 환경변수 폴백
+    if not args.notion_token:
+        import os
+        args.notion_token = os.environ.get("NOTION_TOKEN")
+
+    has_output = bool(args.output)
+    has_notion = bool(args.notion_token and args.notion_db)
+    if not args.dry_run and not args.list_books and not has_output and not has_notion:
+        parser.error("--output, --notion-token+--notion-db, --dry-run, --list-books 중 하나가 필요합니다.")
 
     sys.exit(run_pipeline(args))
 
