@@ -2,34 +2,78 @@
 
 Kindle 기기의 하이라이트·메모·북마크를 여러 형식에서 파싱해 JSON / CSV / Markdown / 텍스트로 내보내거나 Notion 데이터베이스에 직접 동기화하는 파이썬 스크립트.
 
-## 지원 형식
+---
 
-| 파일 | 내용 |
-|------|------|
-| `My Clippings.txt` | 모든 Kindle 기기가 생성하는 표준 클리핑 텍스트 |
-| `.yjr` | Kindle 사이드카 — 하이라이트·북마크·메모 (KFX/AZW3 전용) |
-| `.yjf` | Kindle 사이드카 — 마지막 읽은 위치 |
-| `.sdr/` | 위 두 파일이 들어 있는 사이드카 디렉터리 |
-| `.apnx` | Amazon Page Number Index |
-| `.mbp` | Mobipocket 어노테이션 바이너리 |
+## 전체 워크플로우
+
+```
+킨들 USB 연결
+       │
+       ▼
+┌──────────────────────────────────────────────────────┐
+│  소스 선택                                            │
+│                                                      │
+│  ① KFX + YJR (권장)        ② My Clippings.txt        │
+│     .kfx + .sdr/*.yjr          (구형 포맷 / 삭제된   │
+│     ↓                           전자책 보충용)        │
+│     정확한 원문 복원              ↓                   │
+│     한도 초과 없음               한도 초과 시 누락    │
+└──────┬───────────────────────────┬───────────────────┘
+       │                           │
+       ▼                           ▼
+  sync_kfx.py              sync_clippings_to_notion.py
+  (자동 실행)                    (수동 보충)
+       │                           │
+       └──────────┬────────────────┘
+                  ▼
+        ~/.kindle_notion_sync.json
+        (공유 상태 파일 — fingerprint 중복 방지)
+                  │
+                  ▼
+           Notion 데이터베이스
+```
 
 ---
 
 ## 스크립트 구성
 
-| 스크립트 | 용도 |
-|----------|------|
-| `sync_kfx.py` | **메인 워크플로** — KFX+YJR 기반 증분 동기화, Notion 업로드 |
-| `sync_clippings_to_notion.py` | **보충용** — My Clippings.txt → Notion (수동 실행) |
-| `parse_clippings.py` | 단일 파일/디렉터리 파싱 후 파일 출력 |
-| `sync_clippings.py` | My Clippings.txt 기반 증분 동기화 (파일 출력 전용) |
-| `recover_clippings.py` | My Clippings.txt 한도 초과 텍스트 복구 |
+| 스크립트 | 실행 방식 | 용도 |
+|----------|-----------|------|
+| `sync_kfx.py` | 킨들 연결 후 자동 | KFX+YJR → Notion (메인 워크플로) |
+| `sync_clippings_to_notion.py` | 수동 보충 | My Clippings.txt → Notion |
+| `parse_clippings.py` | 단독 실행 | 단일 파일/디렉터리 파싱 후 파일 출력 |
+| `sync_clippings.py` | 단독 실행 | My Clippings.txt 증분 동기화 (파일 출력 전용) |
+| `recover_clippings.py` | 단독 실행 | My Clippings.txt 한도 초과 텍스트 복구 |
 
 ---
 
 ## 메인 워크플로: KFX+YJR → Notion
 
-킨들을 USB로 연결한 뒤 실행합니다.
+### 파이프라인
+
+```
+킨들 마운트 감지
+      │
+      ▼
+documents/ 스캔
+      │  .kfx 파일마다 짝꿍 .sdr/*.yjr 탐색
+      ▼
+YJR 파싱 (char offset 기반 클리핑 위치)
+      │
+      ▼
+fingerprint 비교 → 신규 항목만 선별
+      │
+      ▼
+KFX에서 원문·페이지·Kindle Location 추출
+      │  (kfxlib — Calibre KFX Input 플러그인 필요)
+      ▼
+파일 출력 (선택)  +  Notion 업로드 (선택)
+      │
+      ▼
+상태 파일 업데이트 (~/.kindle_notion_sync.json)
+```
+
+### 실행
 
 ```bash
 # 환경변수 설정 (한 번만)
@@ -39,11 +83,6 @@ export NOTION_DB=your_database_id
 # 동기화
 python sync_kfx.py --notion-db $NOTION_DB
 ```
-
-- KFX+YJR 쌍이 있는 모든 책을 자동 탐색
-- 신규 클리핑만 Notion에 추가 (fingerprint 기반 중복 제거)
-- KFX에서 실제 하이라이트 텍스트·페이지 번호·Kindle Location 복원
-- 책 표지를 Google Books API에서 자동으로 가져옴
 
 ### 옵션
 
@@ -60,6 +99,62 @@ python sync_kfx.py --notion-db $NOTION_DB
 --kindle PATH           킨들 마운트 경로 직접 지정 (생략 시 자동 감지)
 --log FILE              로그 파일 경로 (기본값: kindle_sync.log)
 ```
+
+---
+
+## 보충 워크플로: My Clippings.txt → Notion
+
+KFX+YJR 파이프라인이 처리하지 못한 책(구형 포맷, 기기에서 삭제된 전자책 등)을 수동으로 보충합니다.
+
+### 언제 필요한가
+
+```
+KFX+YJR 있음? ──Yes──→ sync_kfx.py 로 처리됨 (끝)
+      │
+      No
+      │
+      ▼
+My Clippings.txt에 있음? ──Yes──→ sync_clippings_to_notion.py 로 보충
+      │
+      No
+      │
+      ▼
+   해당 클리핑 복구 불가
+```
+
+### 실행
+
+```bash
+python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB
+
+# 특정 책만
+python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
+    --book "채식주의자"
+
+# KFX가 있으면 한도 초과 텍스트 복구 후 업로드
+python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
+    --kfx "book.kfx"
+
+# 현재 동기화 현황 확인
+python sync_clippings_to_notion.py "My Clippings.txt" --stats
+
+# 업로드 없이 신규 항목 미리 보기
+python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
+    --dry-run
+```
+
+---
+
+## 지원 입력 형식
+
+| 파일 | 내용 |
+|------|------|
+| `My Clippings.txt` | 모든 Kindle 기기가 생성하는 표준 클리핑 텍스트 |
+| `.yjr` | Kindle 사이드카 — 하이라이트·북마크·메모 (KFX/AZW3 전용) |
+| `.yjf` | Kindle 사이드카 — 마지막 읽은 위치 |
+| `.sdr/` | 위 두 파일이 들어 있는 사이드카 디렉터리 |
+| `.apnx` | Amazon Page Number Index |
+| `.mbp` | Mobipocket 어노테이션 바이너리 |
 
 ---
 
@@ -90,49 +185,38 @@ python sync_kfx.py --notion-db $NOTION_DB
 
 ## 중복 제거 방식
 
-상태 파일 (`~/.kindle_notion_sync.json`)에 책별로 동기화한 클리핑의 fingerprint를 저장합니다.
+두 소스(KFX+YJR, My Clippings.txt)가 **같은 상태 파일**(`~/.kindle_notion_sync.json`)을 공유합니다.
 
 ```
-fingerprint = SHA-1(책제목 | 타입 | 위치시작 | 위치끝)
+클리핑 fingerprint = SHA-1(책제목 | 타입 | 위치시작 | 위치끝)
 ```
 
-- KFX+YJR과 My Clippings.txt 두 소스가 **같은 상태 파일을 공유**하므로 소스가 달라도 같은 클리핑이 두 번 올라가지 않습니다.
-- Notion의 Highlights 카운트 비교(구 kindle2notion 방식) 대신 위치 기반으로 판단합니다.
-
----
-
-## 보충 동기화: My Clippings.txt → Notion
-
-KFX+YJR이 없는 책(구형 포맷, 기기에서 삭제된 전자책 등)을 수동으로 보충합니다.
-
-```bash
-python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB
-
-# 특정 책만
-python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
-    --book "채식주의자"
-
-# KFX가 있으면 한도 초과 텍스트 복구 후 업로드
-python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
-    --kfx "book.kfx"
-
-# 현재 동기화 현황 확인
-python sync_clippings_to_notion.py "My Clippings.txt" --stats
-
-# 업로드 없이 신규 항목 미리 보기
-python sync_clippings_to_notion.py "My Clippings.txt" --notion-db $NOTION_DB \
-    --dry-run
 ```
+sync_kfx.py          sync_clippings_to_notion.py
+     │                          │
+     └──────────┬───────────────┘
+                ▼
+   ~/.kindle_notion_sync.json
+   {
+     "books": {
+       "책제목": {
+         "notion_page_id": "abc...",
+         "synced_fingerprints": ["sha1hash", ...]
+       }
+     }
+   }
+```
+
+- 위치가 같으면 소스가 달라도 같은 fingerprint → 중복 업로드 없음
+- Notion Highlights 카운트 비교(구 방식) 대신 위치 기반으로 판단
 
 ---
 
 ## KFX 텍스트·페이지·Location 추출
 
-`.kfx` 파일이 있을 경우, Calibre의 **KFX Input 플러그인**(`kfxlib`)을 이용해 하이라이트 원문·출판사 페이지 번호·Kindle Location 번호를 추출합니다.
+`.kfx` 파일이 있을 경우 Calibre의 **KFX Input 플러그인**(`kfxlib`)을 이용해 하이라이트 원문·출판사 페이지 번호·Kindle Location 번호를 추출합니다.
 
 ### 의존성
-
-Calibre와 KFX Input 플러그인이 설치되어 있어야 합니다.
 
 ```
 /Applications/calibre.app/Contents/MacOS/ebook-convert
