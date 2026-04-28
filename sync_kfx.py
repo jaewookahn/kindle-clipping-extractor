@@ -41,14 +41,12 @@ JSON 출력 구조 (책별):
 
 import argparse
 import contextlib
-import csv
 import hashlib
 import io
 import json
 import logging
 import sys
 from collections import Counter
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Set
@@ -64,6 +62,12 @@ from kindle.ebook import (
     fill_clipping_text,
     fill_clipping_pages,
     fill_clipping_kindle_locations,
+)
+from kindle.exporters import (
+    sync_export_csv,
+    sync_export_markdown,
+    sync_export_text,
+    sync_export_json_grouped,
 )
 
 
@@ -314,89 +318,6 @@ def process_book(
     return new_clips, real_title, author, skipped
 
 
-# ---------------------------------------------------------------------------
-# 출력
-# ---------------------------------------------------------------------------
-
-def _clip_to_dict(c: Clipping) -> dict:
-    d = asdict(c)
-    for key in ("book_title", "author", "source_file"):
-        d.pop(key, None)
-    return {k: v for k, v in d.items() if v is not None and v != ""}
-
-
-def export_json(all_new: list[Clipping], out: Path, meta: dict) -> None:
-    """책별로 그룹화 + 타입별 카운트 포함한 JSON 출력."""
-    books: dict[str, dict] = {}
-    for c in all_new:
-        if c.book_title not in books:
-            books[c.book_title] = {
-                "title":            c.book_title,
-                "author":           c.author or "",
-                "total_highlights": 0,
-                "total_bookmarks":  0,
-                "total_notes":      0,
-                "clippings":        [],
-            }
-        b = books[c.book_title]
-        if c.clip_type == "highlight":
-            b["total_highlights"] += 1
-        elif c.clip_type == "bookmark":
-            b["total_bookmarks"]  += 1
-        elif c.clip_type == "note":
-            b["total_notes"]      += 1
-        b["clippings"].append(_clip_to_dict(c))
-
-    book_list = []
-    for b in books.values():
-        if not b["author"]:
-            del b["author"]
-        book_list.append(b)
-
-    payload = {**meta, "books": book_list}
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def export_csv(clippings: list[Clipping], out: Path) -> None:
-    fields = ["book_title", "author", "clip_type", "page",
-              "location_start", "location_end", "added_date", "content"]
-    with out.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        w.writeheader()
-        for c in clippings:
-            w.writerow({k: getattr(c, k, "") or "" for k in fields})
-
-
-def export_markdown(clippings: list[Clipping], out: Path) -> None:
-    lines = [f"# 킨들 KFX 클리핑  ·  {datetime.now():%Y-%m-%d %H:%M}\n"]
-    current_book = None
-    for c in clippings:
-        if c.book_title != current_book:
-            current_book = c.book_title
-            lines.append(f"\n## {c.book_title}")
-            if c.author:
-                lines.append(f"*{c.author}*\n")
-        loc = f"Location {c.location_start}"
-        if c.location_end and c.location_end != c.location_start:
-            loc += f"–{c.location_end}"
-        label = f"*{c.clip_type} · {loc}"
-        if c.page:
-            label += f" · p.{c.page}"
-        lines.append(label + "*\n")
-        lines.append(f"> {c.content or '(내용 없음)'}\n")
-    out.write_text("\n".join(lines), encoding="utf-8")
-
-
-def export_text(clippings: list[Clipping], out: Path) -> None:
-    lines: list[str] = []
-    for c in clippings:
-        loc = f"Location {c.location_start}"
-        if c.location_end and c.location_end != c.location_start:
-            loc += f"–{c.location_end}"
-        lines.append(f"[{c.book_title}]  {loc}" + (f"  p.{c.page}" if c.page else ""))
-        lines.append(c.content or "(내용 없음)")
-        lines.append("")
-    out.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -509,13 +430,13 @@ def run_pipeline(args) -> int:
     }
 
     if fmt == "json":
-        export_json(all_new, out_path, meta)
+        sync_export_json_grouped(all_new, out_path, meta)
     elif fmt == "csv":
-        export_csv(all_new, out_path)
+        sync_export_csv(all_new, out_path)
     elif fmt == "markdown":
-        export_markdown(all_new, out_path)
+        sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑")
     else:
-        export_text(all_new, out_path)
+        sync_export_text(all_new, out_path)
 
     print(f"저장: {out_path}")
 

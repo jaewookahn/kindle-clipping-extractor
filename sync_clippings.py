@@ -26,20 +26,24 @@ sync_clippings.py — 마운트된 킨들에서 신규 클리핑 자동 동기�
 """
 
 import argparse
-import csv
 import hashlib
 import json
 import re
 import sys
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Set, Dict
 
 from kindle.device import find_kindle, list_device_clippings_file
-from kindle.parsers.my_clippings import parse_my_clippings as _parse
+from kindle.parsers.my_clippings import parse_my_clippings as _parse, is_limit_exceeded
 from kindle.models import Clipping
 from kindle.ebook import _find_kfx_plugin, extract_kfx_info
+from kindle.exporters import (
+    sync_export_csv,
+    sync_export_markdown,
+    sync_export_text,
+    sync_export_json_flat,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -92,21 +96,6 @@ def find_kfx_on_device(kindle_root: Path, book_title: str) -> Optional[Path]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# 한도 초과 판별
-# ---------------------------------------------------------------------------
-
-_LIMIT_PREFIXES = (
-    "<you have reached the clipping limit",
-    "<the clipping limit",
-    "<이 항목의 클리핑 한도",
-)
-
-
-def _is_limit_exceeded(content: str) -> bool:
-    if not content or not content.strip():
-        return True
-    return content.strip().lower().startswith(_LIMIT_PREFIXES)
 
 
 def _recover_text(clippings: List[Clipping], kl_offsets: List[int], book_text: str) -> int:
@@ -116,7 +105,7 @@ def _recover_text(clippings: List[Clipping], kl_offsets: List[int], book_text: s
     for c in clippings:
         if c.clip_type not in ("highlight", "bookmark"):
             continue
-        if not _is_limit_exceeded(c.content):
+        if not is_limit_exceeded(c.content):
             continue
         if c.location_start is None:
             continue
@@ -154,7 +143,7 @@ def recover_by_book(
     total_recovered = 0
     for title, group in groups.items():
         # 한도 초과 항목이 있는 책만 처리
-        needs_recovery = [c for c in group if _is_limit_exceeded(c.content)
+        needs_recovery = [c for c in group if is_limit_exceeded(c.content)
                           and c.clip_type in ("highlight", "bookmark")]
         if not needs_recovery:
             continue
@@ -183,60 +172,6 @@ def recover_by_book(
     return total_recovered
 
 
-# ---------------------------------------------------------------------------
-# 출력
-# ---------------------------------------------------------------------------
-
-def _to_dict(c: Clipping) -> dict:
-    d = asdict(c)
-    return {k: v for k, v in d.items() if v is not None and v != ""}
-
-
-def export_json(clippings: List[Clipping], out: Path, meta: dict) -> None:
-    payload = {
-        **meta,
-        "clippings": [_to_dict(c) for c in clippings],
-    }
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def export_csv(clippings: List[Clipping], out: Path) -> None:
-    fields = ["book_title", "author", "clip_type", "page",
-              "location_start", "location_end", "added_date", "content"]
-    with out.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        w.writeheader()
-        for c in clippings:
-            w.writerow({k: getattr(c, k, "") for k in fields})
-
-
-def export_markdown(clippings: List[Clipping], out: Path) -> None:
-    lines: List[str] = [f"# 킨들 클리핑 동기화  ·  {datetime.now():%Y-%m-%d %H:%M}\n"]
-    current_book = None
-    for c in clippings:
-        if c.book_title != current_book:
-            current_book = c.book_title
-            lines.append(f"\n## {c.book_title}")
-            if c.author:
-                lines.append(f"*{c.author}*\n")
-        loc = f"Location {c.location_start}"
-        if c.location_end and c.location_end != c.location_start:
-            loc += f"–{c.location_end}"
-        lines.append(f"*{c.clip_type} · {loc}*\n")
-        lines.append(f"> {c.content}\n")
-    out.write_text("\n".join(lines), encoding="utf-8")
-
-
-def export_text(clippings: List[Clipping], out: Path) -> None:
-    lines: List[str] = []
-    for c in clippings:
-        loc = f"Location {c.location_start}"
-        if c.location_end and c.location_end != c.location_start:
-            loc += f"–{c.location_end}"
-        lines.append(f"[{c.book_title}]  {loc}")
-        lines.append(c.content or "(내용 없음)")
-        lines.append("")
-    out.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +240,7 @@ def run_pipeline(args) -> int:
         print("\n[dry-run] 저장 생략. 신규 항목:")
         for c in new_clippings:
             loc = f"L{c.location_start}" + (f"-{c.location_end}" if c.location_end else "")
-            flag = " *" if _is_limit_exceeded(c.content) else ""
+            flag = " *" if is_limit_exceeded(c.content) else ""
             print(f"  {c.book_title[:45]:<45}  {loc:<12}  {c.content[:60]}{flag}")
         return 0
 
@@ -324,13 +259,13 @@ def run_pipeline(args) -> int:
     }
 
     if fmt == "json":
-        export_json(new_clippings, out_path, meta)
+        sync_export_json_flat(new_clippings, out_path, meta)
     elif fmt == "csv":
-        export_csv(new_clippings, out_path)
+        sync_export_csv(new_clippings, out_path)
     elif fmt == "markdown":
-        export_markdown(new_clippings, out_path)
+        sync_export_markdown(new_clippings, out_path, heading="킨들 클리핑 동기화")
     else:
-        export_text(new_clippings, out_path)
+        sync_export_text(new_clippings, out_path)
 
     print(f"\n저장: {out_path}  ({len(new_clippings)}개)")
 

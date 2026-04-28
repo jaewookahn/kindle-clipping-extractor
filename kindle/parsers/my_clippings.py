@@ -1,5 +1,18 @@
 """Parser for Amazon's My Clippings.txt format."""
 
+_LIMIT_PREFIXES = (
+    "<you have reached the clipping limit",
+    "<the clipping limit",
+    "<이 항목의 클리핑 한도",
+)
+
+
+def is_limit_exceeded(content: str) -> bool:
+    """Return True if clipping content was truncated by Kindle's copy limit."""
+    if not content or not content.strip():
+        return True
+    return content.strip().lower().startswith(_LIMIT_PREFIXES)
+
 import re
 from pathlib import Path
 from typing import List

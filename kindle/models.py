@@ -13,6 +13,7 @@ class Clipping:
     added_date: Optional[str] = None
     content: str = ""
     source_file: str = ""
+    recovered: bool = False      # True if content was recovered from ebook file
 
 
 @dataclass

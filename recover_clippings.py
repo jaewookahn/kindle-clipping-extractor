@@ -14,7 +14,6 @@ Location 번호 → 문자 오프셋 → 원문 텍스트 순서로 복구한다
     python recover_clippings.py "My Clippings.txt" book.kfx --all -o out.csv
 
 요구사항:
-    - Calibre (ebook-convert)
     - Calibre KFX Input 플러그인 (KFX 형식 처리 시)
 
 My Clippings.txt Location 숫자 vs KFX character offset
@@ -35,187 +34,14 @@ import csv
 import json
 import re
 import sys
-import tempfile
-import zipfile
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Clipping:
-    book_title: str = ""
-    author: str = ""
-    clip_type: str = ""
-    page: Optional[int] = None
-    location_start: Optional[int] = None
-    location_end: Optional[int] = None
-    added_date: Optional[str] = None
-    content: str = ""
-    recovered: bool = False   # True if content was recovered from ebook
-
-
-# ---------------------------------------------------------------------------
-# My Clippings.txt parser
-# ---------------------------------------------------------------------------
-
-_SEP = "=========="
-
-_META_RE = re.compile(
-    r"-\s+Your\s+(?P<type>Highlight|Note|Bookmark)"
-    r"(?:\s+on\s+(?:page\s+(?P<page>\d+)|[^|]+))?"
-    r"(?:\s*\|\s*Location\s+(?P<loc_start>\d+)(?:-(?P<loc_end>\d+))?)?"
-    r"(?:\s*\|\s*Added\s+on\s+(?P<date>.+))?",
-    re.IGNORECASE,
-)
-
-_TITLE_AUTHOR_RE = re.compile(r"^(?P<title>.+?)\s+\((?P<author>[^)]+)\)\s*$")
-
-
-def parse_my_clippings(path: Path) -> List[Clipping]:
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
-    clippings: List[Clipping] = []
-
-    for raw in text.split(_SEP):
-        lines = [l.rstrip() for l in raw.strip().splitlines()]
-        if len(lines) < 2:
-            continue
-
-        title_line = lines[0].lstrip("\ufeff").strip()
-        ta = _TITLE_AUTHOR_RE.match(title_line)
-        title  = ta.group("title").strip()  if ta else title_line
-        author = ta.group("author").strip() if ta else ""
-
-        m = _META_RE.search(lines[1])
-        if not m:
-            continue
-
-        clip_type = (m.group("type") or "highlight").lower()
-        page      = int(m.group("page"))      if m.group("page")      else None
-        loc_s     = int(m.group("loc_start")) if m.group("loc_start") else None
-        loc_e     = int(m.group("loc_end"))   if m.group("loc_end")   else None
-        date_str  = m.group("date").strip()   if m.group("date")      else None
-
-        content_lines = [l for l in lines[2:] if l.strip()]
-        content = " ".join(content_lines).strip()
-
-        clippings.append(Clipping(
-            book_title=title, author=author, clip_type=clip_type,
-            page=page, location_start=loc_s, location_end=loc_e,
-            added_date=date_str, content=content,
-        ))
-
-    return clippings
-
-
-# ---------------------------------------------------------------------------
-# "한도 초과" 감지
-# ---------------------------------------------------------------------------
-
-_LIMIT_PREFIXES = (
-    "<you have reached the clipping limit",
-    "<the clipping limit",
-    "<이 항목의 클리핑 한도",
-)
-
-
-def _is_limit_exceeded(content: str) -> bool:
-    if not content or not content.strip():
-        return True
-    return content.strip().lower().startswith(_LIMIT_PREFIXES)
-
-
-# ---------------------------------------------------------------------------
-# KFX 텍스트 + Kindle Location 맵 추출 (Calibre KFX Input 플러그인 사용)
-# ---------------------------------------------------------------------------
-
-_KFX_PLUGIN_PATHS = [
-    "~/Library/Preferences/calibre/plugins/KFX Input.zip",
-    "~/.config/calibre/plugins/KFX Input.zip",
-]
-
-
-def _find_kfx_plugin() -> Optional[str]:
-    for p in _KFX_PLUGIN_PATHS:
-        expanded = Path(p).expanduser()
-        if expanded.exists():
-            return str(expanded)
-    return None
-
-
-def extract_kfx_data(kfx_path: Path):
-    """
-    KFX 파일에서 (kindle_loc_offsets, book_text) 추출.
-
-    kindle_loc_offsets[i] = Kindle Location (i+1)의 시작 character offset
-    book_text = KFX 내부 character offset이 보존된 전체 텍스트
-
-    Returns (None, None) on failure.
-    """
-    plugin_zip = _find_kfx_plugin()
-    if not plugin_zip:
-        print("  [오류] Calibre KFX Input 플러그인을 찾을 수 없습니다.", file=sys.stderr)
-        print("  설치: Calibre → 환경설정 → 플러그인 → 'KFX Input' 검색 후 설치", file=sys.stderr)
-        return None, None
-
-    tmpdir: Optional[Path] = None
-    try:
-        tmpdir = Path(tempfile.mkdtemp())
-        with zipfile.ZipFile(plugin_zip) as z:
-            for name in z.namelist():
-                if name.startswith("kfxlib/") and not name.endswith("/"):
-                    dest = tmpdir / name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(z.read(name))
-
-        if str(tmpdir) not in sys.path:
-            sys.path.insert(0, str(tmpdir))
-
-        from kfxlib import yj_book  # type: ignore
-
-        book = yj_book.YJ_Book(str(kfx_path))
-        book.decode_book(set_metadata=None)
-        pos_info = book.collect_position_map_info()
-
-        # Kindle Location 맵
-        loc_info = book.collect_location_map_info(pos_info)
-        kindle_loc_offsets: Optional[List[int]] = (
-            [entry.pid for entry in loc_info] if loc_info else None
-        )
-
-        # 책 전체 텍스트 (KFX character offset 보존)
-        book_text: Optional[str] = None
-        try:
-            chunks = sorted(
-                [c for c in book.collect_content_position_info() if c.text],
-                key=lambda c: c.pid,
-            )
-            if chunks:
-                parts: List[str] = []
-                pos = 0
-                for c in chunks:
-                    if c.pid > pos:
-                        parts.append(" " * (c.pid - pos))
-                    parts.append(c.text)
-                    pos = c.pid + c.length
-                book_text = "".join(parts)
-        except Exception as exc:
-            print(f"  [경고] 텍스트 추출 실패: {exc}", file=sys.stderr)
-
-        return kindle_loc_offsets, book_text
-
-    except Exception as exc:
-        print(f"  [오류] KFX 파싱 실패: {exc}", file=sys.stderr)
-        return None, None
-    finally:
-        if tmpdir:
-            import shutil
-            shutil.rmtree(str(tmpdir), ignore_errors=True)
+from kindle.models import Clipping
+from kindle.parsers.my_clippings import parse_my_clippings, is_limit_exceeded
+from kindle.ebook import _find_kfx_plugin, extract_kfx_info
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +54,7 @@ def recover_text(
     book_text: str,
     force: bool = False,
 ) -> int:
-    """
-    Kindle Location 번호를 이용해 한도 초과 클리핑의 텍스트를 복구한다.
-
-    kindle_loc_offsets[i] = KL(i+1) 시작 character offset
+    """Kindle Location 번호를 이용해 한도 초과 클리핑의 텍스트를 복구한다.
 
     Args:
         force: True면 content가 있어도 전자책 텍스트로 덮어쓴다.
@@ -245,7 +68,7 @@ def recover_text(
     for c in clippings:
         if c.clip_type not in ("highlight", "bookmark"):
             continue
-        if not force and not _is_limit_exceeded(c.content):
+        if not force and not is_limit_exceeded(c.content):
             continue
         if c.location_start is None:
             continue
@@ -382,7 +205,11 @@ def main() -> None:
         sys.exit(1)
     if ebook_path.suffix.lower() != ".kfx":
         print("오류: 현재 KFX 형식만 지원합니다.", file=sys.stderr)
-        print("  (KFX가 아닌 경우 킨들 Location → 문자 오프셋 변환이 불가합니다.)", file=sys.stderr)
+        sys.exit(1)
+
+    if not _find_kfx_plugin():
+        print("오류: Calibre KFX Input 플러그인을 찾을 수 없습니다.", file=sys.stderr)
+        print("  설치: Calibre → 환경설정 → 플러그인 → 'KFX Input' 검색 후 설치", file=sys.stderr)
         sys.exit(1)
 
     # 1. 파싱
@@ -398,7 +225,7 @@ def main() -> None:
         clips = all_clips
 
     limit_clips = [c for c in clips
-                   if c.clip_type in ("highlight", "bookmark") and _is_limit_exceeded(c.content)]
+                   if c.clip_type in ("highlight", "bookmark") and is_limit_exceeded(c.content)]
     print(f"  한도 초과 항목: {len(limit_clips)}개")
 
     if args.stats:
@@ -410,7 +237,7 @@ def main() -> None:
 
     # 2. KFX 분석
     print(f"\nKFX 분석: {ebook_path.name} …")
-    kl_offsets, book_text = extract_kfx_data(ebook_path)
+    _, kl_offsets, book_text = extract_kfx_info(ebook_path)
 
     if not kl_offsets or not book_text:
         print("텍스트 또는 Location 맵 추출 실패. 종료합니다.", file=sys.stderr)

@@ -9,6 +9,101 @@ from typing import List
 
 from kindle.models import Clipping, APNXInfo
 
+# ---------------------------------------------------------------------------
+# Sync-pipeline export helpers  (used by sync_kfx.py and sync_clippings.py)
+# ---------------------------------------------------------------------------
+
+
+def _sync_clip_dict(c: Clipping, *, strip_keys: tuple = ()) -> dict:
+    d = asdict(c)
+    for k in strip_keys:
+        d.pop(k, None)
+    return {k: v for k, v in d.items() if v is not None and v != "" and v is not False}
+
+
+def sync_export_csv(clippings: List[Clipping], out: Path) -> None:
+    fields = ["book_title", "author", "clip_type", "page",
+              "location_start", "location_end", "added_date", "content"]
+    with out.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        for c in clippings:
+            w.writerow({k: getattr(c, k, "") or "" for k in fields})
+
+
+def sync_export_markdown(clippings: List[Clipping], out: Path, heading: str = "킨들 클리핑") -> None:
+    lines = [f"# {heading}  ·  {datetime.now():%Y-%m-%d %H:%M}\n"]
+    current_book = None
+    for c in clippings:
+        if c.book_title != current_book:
+            current_book = c.book_title
+            lines.append(f"\n## {c.book_title}")
+            if c.author:
+                lines.append(f"*{c.author}*\n")
+        loc = f"Location {c.location_start}"
+        if c.location_end and c.location_end != c.location_start:
+            loc += f"–{c.location_end}"
+        label = f"*{c.clip_type} · {loc}"
+        if c.page:
+            label += f" · p.{c.page}"
+        lines.append(label + "*\n")
+        lines.append(f"> {c.content or '(내용 없음)'}\n")
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+
+def sync_export_text(clippings: List[Clipping], out: Path) -> None:
+    lines: List[str] = []
+    for c in clippings:
+        loc = f"Location {c.location_start}"
+        if c.location_end and c.location_end != c.location_start:
+            loc += f"–{c.location_end}"
+        lines.append(f"[{c.book_title}]  {loc}" + (f"  p.{c.page}" if c.page else ""))
+        lines.append(c.content or "(내용 없음)")
+        lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+
+def sync_export_json_flat(clippings: List[Clipping], out: Path, meta: dict) -> None:
+    """Flat clipping list — used by sync_clippings.py."""
+    payload = {
+        **meta,
+        "clippings": [_sync_clip_dict(c) for c in clippings],
+    }
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def sync_export_json_grouped(clippings: List[Clipping], out: Path, meta: dict) -> None:
+    """Book-grouped with per-type counts — used by sync_kfx.py."""
+    strip = ("book_title", "author", "source_file")
+    books: dict[str, dict] = {}
+    for c in clippings:
+        if c.book_title not in books:
+            books[c.book_title] = {
+                "title":            c.book_title,
+                "author":           c.author or "",
+                "total_highlights": 0,
+                "total_bookmarks":  0,
+                "total_notes":      0,
+                "clippings":        [],
+            }
+        b = books[c.book_title]
+        if c.clip_type == "highlight":
+            b["total_highlights"] += 1
+        elif c.clip_type == "bookmark":
+            b["total_bookmarks"]  += 1
+        elif c.clip_type == "note":
+            b["total_notes"]      += 1
+        b["clippings"].append(_sync_clip_dict(c, strip_keys=strip))
+
+    book_list = []
+    for b in books.values():
+        if not b["author"]:
+            del b["author"]
+        book_list.append(b)
+
+    payload = {**meta, "books": book_list}
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def _clipping_to_dict(c: Clipping) -> dict:
     d = asdict(c)
