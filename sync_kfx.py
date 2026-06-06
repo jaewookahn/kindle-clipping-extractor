@@ -21,6 +21,8 @@ YJR은 KFX 내부 character offset을 그대로 저장하므로 텍스트가 정
     python sync_kfx.py --reset -o full.json         # 상태 초기화 후 전체 재동기화
     python sync_kfx.py --kindle /Volumes/Kindle -o out.md
     python sync_kfx.py --list-books                 # KFX 목록만 출력
+    python sync_kfx.py --book gongsandang -o out.json  # 특정 책만 (stem substring, 대소문자 무시)
+    python sync_kfx.py --book A --book B --dry-run     # 여러 책 지정
     python sync_kfx.py --log sync.log -o out.json   # 로그 파일 지정
 
 JSON 출력 구조 (책별):
@@ -231,24 +233,40 @@ def find_kfx_sdr_pairs(documents: Path) -> list[tuple[Path, Path, str]]:
     """
     documents/ 아래에서 (kfx_path, sdr_path, file_stem) 쌍을 모두 찾아 반환.
     KFX 없이 .sdr만 있는 책, 또는 YJR이 없는 .sdr은 제외.
+
+    Kindle은 .sdr 폴더와 책 파일이 documents/ 직속에 평탄하게 놓여 있으므로
+    rglob 대신 한 단계 iterdir만 사용한다. (MacDroid FileProvider 같은 가상
+    마운트에서 rglob은 모든 .sdr 내부까지 MTP로 재귀 탐색하여 매우 느리다.)
     """
     pairs: list[tuple[Path, Path, str]] = []
 
-    for sdr in sorted(documents.rglob("*.sdr")):
-        if not sdr.is_dir():
-            continue
+    sdrs: list[Path] = []
+    ebooks_by_stem: dict[str, Path] = {}   # 동일 stem에 여러 확장자가 있으면 _KFX_EXTS 순서로 우선
+    try:
+        for entry in documents.iterdir():
+            name_lower = entry.name.lower()
+            if name_lower.endswith(".sdr") and entry.is_dir():
+                sdrs.append(entry)
+            else:
+                ext = entry.suffix.lower()
+                if ext in _KFX_EXTS and entry.is_file():
+                    existing = ebooks_by_stem.get(entry.stem)
+                    if existing is None or _KFX_EXTS.index(ext) < _KFX_EXTS.index(existing.suffix.lower()):
+                        ebooks_by_stem[entry.stem] = entry
+    except (PermissionError, OSError):
+        return pairs
+
+    for sdr in sorted(sdrs):
         stem = sdr.stem
-
-        kfx = None
-        for ext in _KFX_EXTS:
-            candidate = sdr.parent / (stem + ext)
-            if candidate.exists():
-                kfx = candidate
-                break
-
-        if kfx is None or not list(sdr.glob("*.yjr")):
+        kfx = ebooks_by_stem.get(stem)
+        if kfx is None:
             continue
-
+        try:
+            has_yjr = any(f.suffix.lower() == ".yjr" for f in sdr.iterdir())
+        except (PermissionError, OSError):
+            continue
+        if not has_yjr:
+            continue
         pairs.append((kfx, sdr, stem))
 
     return pairs
@@ -352,6 +370,16 @@ def run_pipeline(args) -> int:
     print("\nKFX + YJR 쌍 탐색 중 …")
     pairs = find_kfx_sdr_pairs(documents)
     print(f"  발견: {len(pairs)}개 책")
+
+    if args.book:
+        patterns = [p.lower() for p in args.book]
+        filtered = [(k, s, st) for (k, s, st) in pairs
+                    if any(p in st.lower() for p in patterns)]
+        print(f"  --book 필터: {len(filtered)}개 매칭  (패턴: {', '.join(args.book)})")
+        if not filtered:
+            print("매칭되는 책이 없습니다. --list-books 로 stem 확인 후 다시 시도하세요.", file=sys.stderr)
+            return 1
+        pairs = filtered
 
     if not pairs:
         print("처리할 책이 없습니다.")
@@ -517,6 +545,9 @@ def main() -> None:
                         help="상태 파일 초기화 후 전체 재동기화")
     parser.add_argument("--list-books", action="store_true",
                         help="KFX + YJR 쌍 목록만 출력하고 종료")
+    parser.add_argument("--book", action="append", default=None, metavar="PATTERN",
+                        help="특정 책만 처리 (stem 파일명 substring, 대소문자 무시). "
+                             "여러 번 지정 가능: --book A --book B")
     # Notion
     parser.add_argument("--notion-token", default=None, metavar="TOKEN",
                         help="Notion 통합 토큰 (NOTION_TOKEN 환경변수로도 설정 가능)")

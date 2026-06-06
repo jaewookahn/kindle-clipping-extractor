@@ -123,7 +123,10 @@ fixture: `examples/gongsandangseoneon - *.sdr/` 실제 KFX 예제 사용.
 
 ## 의존성
 
+`pip install -r requirements.txt` — 런타임/테스트 의존성 모두 포함.
+
 - `notional` — Notion API 클라이언트
 - `tqdm` — 진행 표시
 - `requests` — Google Books API (표지 이미지)
-- Calibre + KFX Input 플러그인 — KFX 텍스트 추출 (선택)
+- `pypdf` — kfxlib이 일부 KFX 변형에서 요구. 없으면 `extract_kfx_info failed: No module named 'pypdf'` 경고와 함께 본문·KL 맵이 비게 됨.
+- Calibre + KFX Input 플러그인 — KFX 텍스트 추출 (선택, pip 외 별도 설치)

@@ -475,6 +475,7 @@ def find_kindle() -> Optional[Path]:
 
     Scans all mounted volumes/drives rather than checking a fixed path, so
     it finds the Kindle even when macOS names it ``Kindle 1``, ``KINDLE``, etc.
+    Also recognises MacDroid FileProvider mounts under ``~/Library/CloudStorage/``.
     """
     # macOS: scan every volume under /Volumes/
     volumes = Path("/Volumes")
@@ -483,6 +484,21 @@ def find_kindle() -> Optional[Path]:
             for vol in sorted(volumes.iterdir()):
                 if _is_kindle_volume(vol):
                     return vol
+        except (PermissionError, OSError):
+            pass
+
+    # macOS + MacDroid: MTP-only Kindles (Scribe 등 mass-storage 미지원 모델)은
+    # MacDroid FileProvider 확장으로 마운트되어 /Volumes에 안 잡힌다.
+    # 경로 패턴: ~/Library/CloudStorage/MacDroid-<DeviceName>/Internal Storage/
+    cloudstorage = Path.home() / "Library" / "CloudStorage"
+    if cloudstorage.exists():
+        try:
+            for entry in sorted(cloudstorage.iterdir()):
+                if not entry.name.startswith("MacDroid-"):
+                    continue
+                inner = entry / "Internal Storage"
+                if _is_kindle_volume(inner):
+                    return inner
         except (PermissionError, OSError):
             pass
 

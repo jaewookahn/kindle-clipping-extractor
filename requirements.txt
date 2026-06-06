@@ -1,0 +1,8 @@
+# 런타임 의존성
+notional>=0.8.2         # Notion API 클라이언트 (sync_kfx --notion-db, sync_clippings_to_notion)
+tqdm>=4.67              # 진행 표시 바
+requests>=2.33          # Google Books API 표지 이미지 조회 (notion_export.py)
+pypdf>=6.0              # kfxlib이 일부 KFX 변형에서 요구. 없으면 본문·KL 맵 추출 실패.
+
+# 테스트 (선택)
+pytest>=6.2

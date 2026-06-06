@@ -46,6 +46,8 @@ def sync_export_markdown(clippings: List[Clipping], out: Path, heading: str = "�
         label = f"*{c.clip_type} · {loc}"
         if c.page:
             label += f" · p.{c.page}"
+        if c.added_date:
+            label += f" · {c.added_date}"
         lines.append(label + "*\n")
         lines.append(f"> {c.content or '(내용 없음)'}\n")
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -57,7 +59,12 @@ def sync_export_text(clippings: List[Clipping], out: Path) -> None:
         loc = f"Location {c.location_start}"
         if c.location_end and c.location_end != c.location_start:
             loc += f"–{c.location_end}"
-        lines.append(f"[{c.book_title}]  {loc}" + (f"  p.{c.page}" if c.page else ""))
+        header = f"[{c.book_title}]  {loc}"
+        if c.page:
+            header += f"  p.{c.page}"
+        if c.added_date:
+            header += f"  ({c.added_date})"
+        lines.append(header)
         lines.append(c.content or "(내용 없음)")
         lines.append("")
     out.write_text("\n".join(lines), encoding="utf-8")
