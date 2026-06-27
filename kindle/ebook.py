@@ -159,6 +159,38 @@ def fill_clipping_text(clippings: List[Clipping], book_text: str) -> None:
             c.content = color_tag + snippet
 
 
+def extract_kfx_cover(kfx_path: Path) -> Optional[tuple[str, bytes]]:
+    """Extract the embedded cover image from a KFX file.
+
+    KFX 파일에는 이미 정품 표지(고해상도)가 들어있으므로 외부 검색보다
+    정확하고 빠르며 오프라인이다.
+
+    Returns (ext, raw_bytes) e.g. ("jpeg", b"\\xff\\xd8...") or None.
+    Requires the Calibre "KFX Input" plugin.
+    """
+    if not _find_kfx_plugin():
+        return None
+    try:
+        with _kfxlib_context():
+            from kfxlib import yj_book  # type: ignore
+
+            book = yj_book.YJ_Book(str(kfx_path))
+            book.decode_book(set_metadata=None)
+            if not book.has_cover_data():
+                return None
+            data = book.get_cover_image_data()   # (ext, bytes)
+            if not data:
+                return None
+            ext, raw = data
+            if not raw:
+                return None
+            return (str(ext).lower(), bytes(raw))
+    except Exception as exc:
+        print(f"  [warn] extract_kfx_cover failed ({kfx_path.name}): {exc}",
+              file=sys.stderr)
+        return None
+
+
 def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
     """Extract title and author from a KFX file. Falls back to filename on failure."""
     fallback: dict[str, str] = {"title": kfx_path.stem, "author": ""}

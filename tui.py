@@ -47,6 +47,7 @@ from kindle.notion_export import (
 from kindle.parsers.yjr import parse_yjr
 from kindle.ebook import (
     extract_kfx_info,
+    extract_kfx_cover,
     fill_clipping_text,
     fill_clipping_pages,
     fill_clipping_chapters,
@@ -156,8 +157,9 @@ class ClippingPreview(ModalScreen):
     """선택한 책의 클리핑 목록 (YJR + KFX 텍스트 채워서)."""
 
     BINDINGS = [
-        Binding("escape", "dismiss",        "닫기"),
+        Binding("escape", "close_or_clear", "닫기"),
         Binding("q",      "dismiss",        "닫기", show=False),
+        Binding("slash",  "focus_search",   "검색"),
         Binding("w",      "toggle_wrap",    "워드랩"),
         Binding("1",      "sort_clip('idx')",    "#",     show=False),
         Binding("2",      "sort_clip('type')",   "타입",  show=False),
@@ -253,6 +255,15 @@ class ClippingPreview(ModalScreen):
     }
     #preview-table > .datatable--odd-row { background: #303446; }
     #preview-table > .datatable--even-row { background: #292c3c; }
+    .clip-search {
+        display: none;
+        height: 3;
+        margin: 1 0 0 0;
+        border: round #51576d;
+        background: #292c3c;
+        color: #c6d0f5;
+    }
+    .clip-search:focus { border: round #ca9ee6; }
     """
 
     def __init__(self, book: dict) -> None:
@@ -263,6 +274,7 @@ class ClippingPreview(ModalScreen):
         self.wrap_on: bool = True
         self.sort_key: str = "date"
         self.sort_reverse: bool = False
+        self.search_text: str = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-box"):
@@ -274,6 +286,8 @@ class ClippingPreview(ModalScreen):
                 )
                 with Horizontal(id="toolbar"):
                     yield Button("⏎ wrap: ON", id="wrap-toggle", classes="-wrap-on")
+            yield Input(placeholder="🔍  검색 — 내용·챕터·색·타입 (Esc 로 해제)",
+                        id="clip-search", classes="clip-search")
             with Horizontal(id="preview-body"):
                 with Vertical(id="cover-panel"):
                     yield Static("[dim]표지 로드 중…[/dim]", id="cover-image", classes="cover")
@@ -356,8 +370,45 @@ class ClippingPreview(ModalScreen):
         dest.write_bytes(r.content)
         return dest
 
+    def _embedded_cover_path(self, kfx: Path) -> Optional[Path]:
+        """KFX 임베디드 표지를 디스크 캐시에 추출해 경로 반환 (mtime·size 키)."""
+        import hashlib
+        self._COVER_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            st = kfx.stat()
+        except OSError:
+            return None
+        key = hashlib.sha1(
+            f"{kfx.resolve()}|{st.st_mtime_ns}|{st.st_size}".encode()
+        ).hexdigest()
+        for ext in ("jpg", "jpeg", "png", "webp", "gif"):
+            p = self._COVER_DIR / f"kfx_{key}.{ext}"
+            if p.exists() and p.stat().st_size > 0:
+                return p
+        res = extract_kfx_cover(kfx)
+        if not res:
+            return None
+        ext, raw = res
+        ext = {"jpeg": "jpg"}.get(ext, ext) or "jpg"
+        p = self._COVER_DIR / f"kfx_{key}.{ext}"
+        p.write_bytes(raw)
+        return p
+
     def _load_cover(self) -> None:
-        """표지 URL → (고해상도 우선) 디스크 캐시 다운로드 → Image 위젯 교체."""
+        """표지: ① KFX 임베디드(오프라인·정확·고해상도) 우선 → ② 외부 검색 폴백."""
+        # ① KFX 파일에 내장된 정품 표지
+        kfx = self.book.get("kfx")
+        if kfx and Path(kfx).exists():
+            try:
+                p = self._embedded_cover_path(Path(kfx))
+                if p:
+                    self.app.call_from_thread(
+                        lambda p=p: self._swap_in_image(p, "KFX 내장 표지")
+                    )
+                    return
+            except Exception:
+                pass
+        # ② 외부 검색(알라딘 → Yes24 → Google Books)
         try:
             url = _get_cover_url(self.book["title"], self.book["author"])
         except Exception as e:
@@ -524,6 +575,21 @@ class ClippingPreview(ModalScreen):
         self.errors = errors or []
         self._redraw_table()
 
+    def _filtered_clips(self) -> list:
+        """검색어로 클리핑 필터 — 내용·챕터·타입·페이지 대상 (대소문자 무시)."""
+        ft = self.search_text.strip().lower()
+        if not ft:
+            return self.clips
+        out = []
+        for c in self.clips:
+            hay = " ".join([
+                c.content or "", c.chapter or "",
+                c.clip_type or "", str(c.page or ""),
+            ]).lower()
+            if ft in hay:
+                out.append(c)
+        return out
+
     def _redraw_table(self) -> None:
         table = self.query_one("#preview-table", DataTable)
         table.loading = False
@@ -538,8 +604,13 @@ class ClippingPreview(ModalScreen):
             return
         if self.errors:
             self.notify(" / ".join(self.errors), severity="warning", timeout=6)
+        clips = self._filtered_clips()
+        if not clips:
+            table.add_row("-", "-", "-", "-", "-", "-", "-",
+                          f"(검색 결과 없음: '{self.search_text}')")
+            return
         key_fn = self.SORT_KEYS.get(self.sort_key, self.SORT_KEYS["date"])
-        clips_sorted = sorted(self.clips, key=key_fn, reverse=self.sort_reverse)
+        clips_sorted = sorted(clips, key=key_fn, reverse=self.sort_reverse)
         for i, c in enumerate(clips_sorted, 1):
             loc = f"L{c.location_start}" if c.location_start is not None else "-"
             if c.location_end and c.location_end != c.location_start:
@@ -585,6 +656,32 @@ class ClippingPreview(ModalScreen):
             )
 
     # -- actions ----------------------------------------------------------
+
+    def action_focus_search(self) -> None:
+        inp = self.query_one("#clip-search", Input)
+        inp.display = True
+        inp.focus()
+
+    def action_close_or_clear(self) -> None:
+        """Esc: 검색 중이면 검색 해제, 아니면 모달 닫기."""
+        inp = self.query_one("#clip-search", Input)
+        if inp.display and (inp.value or inp.has_focus):
+            inp.value = ""
+            inp.display = False
+            self.search_text = ""
+            self._redraw_table()
+            self.query_one("#preview-table", DataTable).focus()
+            return
+        self.dismiss()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "clip-search":
+            self.search_text = event.value
+            self._redraw_table()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "clip-search":
+            self.query_one("#preview-table", DataTable).focus()
 
     def action_toggle_wrap(self) -> None:
         self.wrap_on = not self.wrap_on

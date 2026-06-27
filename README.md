@@ -83,7 +83,8 @@ python tui.py --kindle "<경로>"              # 경로 직접 지정
 
 ### 클리핑 미리보기
 
-- 좌측 32 칸: **책 표지** (알라딘 → Yes24 → Google Books 순으로 검색)
+- 좌측 32 칸: **책 표지** — KFX 파일에 내장된 정품 표지(고해상도·오프라인) 우선,
+  없으면 외부 검색(알라딘 → Yes24 → Google Books) 폴백
 - 우측: 클리핑 표 (`# / 타입 / 색 / 페이지 / 위치 / 날짜 / 챕터 / 내용`)
 - 타입 아이콘: 하이라이트 `✎`(노랑) / 노트 `✐`(초록) / 위치 `➤`(보라) / 북마크 `🔖`
 - 색상: yellow/blue/pink/orange 등 배경색 chip 으로 시각화
@@ -91,6 +92,7 @@ python tui.py --kindle "<경로>"              # 경로 직접 지정
 - 북마크는 의미 없는 단일-문자 텍스트 대신 `—` 표시
 - 내용은 CJK 셀 너비를 인식해 자동 워드랩 (`w` 로 토글)
 - 클리핑 표도 `1`–`7` 로 컬럼 정렬 (`7` = 챕터)
+- **검색**: `/` 로 검색창 열어 내용·챕터·타입·페이지 즉시 필터, `Esc` 로 해제
 
 ### 표지 렌더링 (터미널 호환성)
 
@@ -105,8 +107,9 @@ python tui.py --kindle "<경로>"              # 경로 직접 지정
 - **tmux 안에서도 선명하게** 하려면: tmux `set -g allow-passthrough on` 후
   `KINDLE_TUI_IMAGE=tgp python tui.py` 로 강제 (또는 tmux 밖에서 실행)
 - `KINDLE_TUI_IMAGE` 값: `tgp` / `sixel` / `halfcell` / `unicode` / `auto`
-- 표지는 고해상도(알라딘 cover500) 우선, `~/.cache/kindle_covers/` 에 캐싱돼
-  두 번째 열기부터 즉시 표시. URL 은 `~/.kindle_cover_cache.json` 에 캐싱
+- 표지 우선순위: **① KFX 내장 표지**(`get_cover_image_data`, 1500×2200급 고해상도)
+  → ② 알라딘 cover500 → cover200. 모두 `~/.cache/kindle_covers/` 에 캐싱돼
+  두 번째 열기부터 즉시 표시. 외부 URL 은 `~/.kindle_cover_cache.json` 에 캐싱
 
 ### 동기화 모달
 
@@ -439,6 +442,15 @@ python parse_clippings.py \
     "examples/gongsandangseoneon - kareul mareukeuseu _ peurideurihi enggelseu.sdr/" \
     -o out.md -f markdown
 ```
+
+---
+
+## 향후 계획
+
+- **Notion 표지에 KFX 내장 표지 사용** — 현재 Notion 페이지 커버는 외부 URL(알라딘)
+  참조 방식이라, KFX 파일에 내장된 정품 고해상도 표지를 못 쓴다. Notion File Upload
+  API(2025) 로 이미지 바이트를 업로드(multipart → `file_id` 참조)하면 "내가 가진
+  정확한 표지" 를 Notion 에도 박을 수 있다. 2단계 업로드라 구현 복잡도가 올라감.
 
 ---
 

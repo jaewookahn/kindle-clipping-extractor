@@ -91,10 +91,16 @@ class Clipping:
 
 ## 표지 캐시
 
+- 이미지 파일 캐시(TUI): `~/.cache/kindle_covers/`
+  - KFX 내장 표지: `kfx_<sha1(path|mtime|size)>.jpg`
+  - 외부 다운로드: `<sha1(url)>.jpg`
 - URL 캐시: `~/.kindle_cover_cache.json` — `(title|author) → url`, hit 만 디스크 저장
-- 이미지 파일 캐시(TUI): `~/.cache/kindle_covers/<sha1(url)>.jpg`
-- 소스 우선순위: 알라딘 → Yes24 → Google Books (`_get_cover_url`)
-- TUI 는 고해상도(알라딘 `cover500`) 우선 다운로드, 실패 시 `cover200` 폴백
+- **TUI 우선순위**: ① KFX 내장 표지(`extract_kfx_cover` → `get_cover_image_data`,
+  고해상도·오프라인·정확) → ② 알라딘 `cover500` → `cover200` → Yes24 → Google Books
+- **Notion 표지**: 외부 **URL** 방식(`ExternalFile[url]`, `_get_cover_url`).
+  이미지 바이트 업로드가 아니라 알라딘 등 공개 URL 참조. KFX 내장 표지는
+  호스팅 URL 이 없어 Notion 에는 못 씀 (TUI 전용)
+  - 계획: Notion File Upload API 로 내장 표지 업로드 → 커버 지정 (README 향후 계획)
 - 표지 렌더러: tmux 안=HalfcellImage, Ghostty/Kitty/WezTerm=TGPImage,
   그 외 AutoImage. `KINDLE_TUI_IMAGE` 로 강제 가능 (`ClippingPreview._image_widget_cls`)
 
