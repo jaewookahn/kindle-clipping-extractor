@@ -449,16 +449,37 @@ class ClippingPreview(ModalScreen):
             pass
 
     @staticmethod
+    def _kitty_capable() -> bool:
+        """Kitty 그래픽 프로토콜(TGP)을 쓸 수 있는 터미널인가.
+
+        tmux 안이라도 GHOSTTY_*/KITTY_*/WEZTERM_* 환경변수는 살아있다.
+        TERM 은 tmux 안에서 'tmux-256color' 로 가려지므로 env 우선.
+        """
+        import os
+        term = os.environ.get("TERM", "").lower()
+        prog = os.environ.get("TERM_PROGRAM", "").lower()
+        return (
+            bool(os.environ.get("KITTY_WINDOW_ID"))
+            or bool(os.environ.get("GHOSTTY_RESOURCES_DIR"))
+            or bool(os.environ.get("GHOSTTY_BIN_DIR"))
+            or bool(os.environ.get("WEZTERM_EXECUTABLE"))
+            or "kitty" in term or "ghostty" in term
+            or prog in ("ghostty", "wezterm", "kitty")
+        )
+
+    @staticmethod
     def _image_widget_cls():
         """터미널 환경에 맞는 textual-image 위젯 클래스 선택.
 
-        tmux/screen 안에서는 Kitty(TGP)·Sixel 같은 그래픽 프로토콜 escape 가
-        멀티플렉서에 먹혀 빈 화면이 된다. 이 경우 컬러 문자(half-block)로
-        그리는 HalfcellImage 로 폴백 — 저화질이지만 어디서나 보인다.
-        그래픽 가능한 순수 터미널이면 AutoImage 로 고화질.
+        Kitty 그래픽 지원 터미널(Ghostty/Kitty/WezTerm)이면 tmux 안이든 밖이든
+        TGPImage 사용 — textual-image 가 tmux passthrough(\\033Ptmux;…) 봉투로
+        그래픽 escape 를 감싸 멀티플렉서를 통과시킨다. 단 tmux 측
+        `allow-passthrough on` 이 필요하며, 앱 시작 시 자동으로 켠다
+        (KindleTUI._enable_tmux_passthrough).
 
-        KINDLE_TUI_IMAGE=tgp|sixel|halfcell|unicode|auto 로 강제 지정 가능
-        (예: tmux passthrough 설정한 사용자가 'tgp' 로 고화질 강제).
+        그래픽 불가 터미널이 tmux 안이면 컬러 문자 half-block 로 폴백.
+
+        KINDLE_TUI_IMAGE=tgp|sixel|halfcell|unicode|auto 로 강제 지정 가능.
         """
         import os
         from textual_image.widget import (
@@ -472,26 +493,11 @@ class ClippingPreview(ModalScreen):
         }.get(override)
         if forced:
             return forced
+        if ClippingPreview._kitty_capable():
+            return TGPImage   # tmux 안이면 passthrough 로 통과
         term = os.environ.get("TERM", "").lower()
-        prog = os.environ.get("TERM_PROGRAM", "").lower()
         in_mux = bool(os.environ.get("TMUX")) or "tmux" in term or "screen" in term
-        if in_mux:
-            # 멀티플렉서는 그래픽 escape 를 차단 → 컬러 문자 폴백
-            return HalfcellImage
-        # Kitty 그래픽 프로토콜(TGP) 지원이 확실한 터미널은 직접 TGP 강제.
-        # AutoImage 의 런타임 탐지는 Textual 이 stdin 을 점유하면 실패해
-        # 저화질 half-cell 로 떨어지는 일이 잦다.
-        kitty_capable = (
-            bool(os.environ.get("KITTY_WINDOW_ID"))
-            or bool(os.environ.get("GHOSTTY_RESOURCES_DIR"))
-            or bool(os.environ.get("GHOSTTY_BIN_DIR"))
-            or bool(os.environ.get("WEZTERM_EXECUTABLE"))
-            or "kitty" in term or "ghostty" in term
-            or prog in ("ghostty", "wezterm", "kitty")
-        )
-        if kitty_capable:
-            return TGPImage
-        return AutoImage
+        return HalfcellImage if in_mux else AutoImage
 
     def _swap_in_image(self, path: Path, url: str) -> None:
         """기존 #cover-image 위젯 제거 후 그 자리에 textual-image Image 마운트."""
@@ -1350,8 +1356,28 @@ class KindleTUI(App):
 
     # -- lifecycle ----------------------------------------------------------
 
+    @staticmethod
+    def _enable_tmux_passthrough() -> None:
+        """tmux 안 + Kitty 그래픽 터미널이면 allow-passthrough 를 켠다.
+
+        textual-image 가 그래픽 escape 를 tmux 봉투로 감싸도, tmux 측에서
+        passthrough 가 꺼져 있으면 통째로 버려진다. 현재 패널에 한해(-p) 켜
+        TGP 표지가 tmux 안에서도 선명하게 뜨도록 한다. 실패해도 무시(폴백).
+        """
+        import os, subprocess
+        if not os.environ.get("TMUX") or not ClippingPreview._kitty_capable():
+            return
+        try:
+            subprocess.run(
+                ["tmux", "set", "-p", "allow-passthrough", "on"],
+                check=False, capture_output=True, timeout=2,
+            )
+        except Exception:
+            pass
+
     def on_mount(self) -> None:
         self.title    = "kindle-clipping-tui"
+        self._enable_tmux_passthrough()
         self.query_one(AppLogo).sub = (
             "↑↓ 이동   ⏎ 미리보기   / 필터   s 동기화   k 기기   1-6 정렬   q 종료"
         )

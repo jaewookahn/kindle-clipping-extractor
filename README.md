@@ -101,16 +101,16 @@ python tui.py --kindle "<경로>"              # 경로 직접 지정
 | 환경 | 렌더러 | 화질 |
 |---|---|---|
 | Ghostty / Kitty / WezTerm (tmux 밖) | Kitty 그래픽(TGP) | 선명 |
-| tmux·screen 안 | half-block(컬러 문자) | 중간 — 멀티플렉서가 그래픽 escape 차단, 셀 수만큼 해상도 |
+| Ghostty / Kitty / WezTerm + **tmux** | Kitty 그래픽(TGP, tmux passthrough) | **선명 (자동)** |
+| 그래픽 불가 터미널 + tmux | half-block(컬러 문자) | 중간 — 셀 수만큼 해상도 |
 | 기타 | AutoImage 자동 탐지 | 터미널에 따름 |
 
-- tmux 안에서는 **half-block 해상도 = 표지 패널의 셀 수**라, 패널을 크게(40×28셀)
-  잡아 최대한 선명하게 렌더한다. UnicodeImage 는 색을 잃어 오히려 나빠서 안 씀.
-- **tmux 안에서도 진짜 고화질**로 하려면:
-  - tmux `set -g allow-passthrough on` 후 `KINDLE_TUI_IMAGE=tgp python tui.py` (Kitty 그래픽)
-  - 또는 tmux 3.4+ & 터미널이 sixel 지원 시 `KINDLE_TUI_IMAGE=sixel`
-  - 가장 확실한 건 **tmux 밖에서 실행** (Ghostty/Kitty/WezTerm → TGP 자동)
-- `KINDLE_TUI_IMAGE` 값: `tgp` / `sixel` / `halfcell` / `unicode` / `auto`
+- **tmux 안에서도 자동 고화질**: Kitty 그래픽 터미널이면 textual-image 가 그래픽
+  escape 를 tmux passthrough 봉투(`\033Ptmux;…`)로 감싸 통과시킨다. 앱이 시작 시
+  현재 패널에 `tmux set -p allow-passthrough on` 을 자동 적용하므로 별도 설정 불필요.
+- 그래픽 불가 터미널의 tmux 폴백은 **half-block 해상도 = 패널 셀 수**라, 패널을
+  크게(40×28셀) 잡아 최대한 선명하게 한다. (UnicodeImage 는 색을 잃어 안 씀.)
+- 수동 강제: `KINDLE_TUI_IMAGE` = `tgp` / `sixel` / `halfcell` / `unicode` / `auto`
 - 표지 우선순위: **① KFX 내장 표지**(`get_cover_image_data`, 1500×2200급 고해상도)
   → ② 알라딘 cover500 → cover200. 모두 `~/.cache/kindle_covers/` 에 캐싱돼
   두 번째 열기부터 즉시 표시. 외부 URL 은 `~/.kindle_cover_cache.json` 에 캐싱
