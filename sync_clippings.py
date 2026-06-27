@@ -158,7 +158,7 @@ def recover_by_book(
             print(f"  [{title[:40]}] KFX 발견: {kfx.name}")
             print(f"    → {len(needs_recovery)}개 한도 초과 항목 복구 시도 …")
 
-        _, kl_offsets, book_text = extract_kfx_info(kfx)
+        _, kl_offsets, book_text, _ = extract_kfx_info(kfx)
         if not kl_offsets or not book_text:
             if verbose:
                 print(f"    → 추출 실패", file=sys.stderr)

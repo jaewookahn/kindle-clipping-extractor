@@ -49,7 +49,11 @@ def load_state(path: Path) -> dict:
 
 
 def save_state(path: Path, state: dict) -> None:
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    # default=str — UUID 등 비-JSON 타입 자동 문자열화 (재진입 시에도 정상)
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +74,8 @@ def _format_clipping(c: Clipping) -> str:
     prefix = "> NOTE:\n" if c.clip_type == "note" else ""
 
     meta_parts: List[str] = []
+    if c.chapter:
+        meta_parts.append(c.chapter)
     if c.location_start:
         loc = str(c.location_start)
         if c.location_end:
@@ -101,14 +107,91 @@ def _split_chunks(text: str, max_len: int = 2000) -> List[str]:
 # ---------------------------------------------------------------------------
 # Book cover
 # ---------------------------------------------------------------------------
+#
+# 한국 책 위주라 Google Books 만으로는 적중률이 낮다.
+# 알라딘 → Yes24 → Google Books 순서로 시도하고 첫 hit 사용.
+# 모두 공개 검색 페이지 HTML 을 가볍게 파싱한다 (API key 불필요).
 
-def _get_cover_url(title: str, author: str) -> Optional[str]:
+_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"}
+
+# 표지 URL 디스크 캐시 — 세션 간 유지. 매번 알라딘 검색하면 느리므로
+# (title|author) → url 을 저장해 두 번째부터는 네트워크 없이 즉시 반환.
+_COVER_CACHE_PATH = Path.home() / ".kindle_cover_cache.json"
+
+
+def _load_cover_cache() -> dict:
     try:
-        from requests import get as http_get
+        return json.loads(_COVER_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_cover_cache() -> None:
+    try:
+        _COVER_CACHE_PATH.write_text(
+            json.dumps(_COVER_CACHE, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+_COVER_CACHE: dict[str, Optional[str]] = _load_cover_cache()
+
+
+def _try_aladin(title: str, author: str) -> Optional[str]:
+    """알라딘 검색 결과 첫 책의 정면 커버 URL.
+
+    검색 페이지에는 작은 `SpineShelf` (책등) 이미지가 먼저 나오므로,
+    같은 product 경로의 `/cover/` 버전으로 정면 표지를 잡는다.
+    """
+    import urllib.parse, re, requests
+    q = title + (" " + author if author else "")
+    url = ("https://www.aladin.co.kr/search/wsearchresult.aspx?"
+           f"SearchTarget=Book&KeyWord={urllib.parse.quote(q)}")
+    try:
+        html = requests.get(url, timeout=6, headers=_UA).text
+    except Exception:
+        return None
+    # 알라딘 검색결과 HTML 에는 cover200 (200px 정면 표지) 경로가 정확히 들어있음
+    m = re.search(
+        r'(/product/\d+/\d+/cover200/[^"\'\s]+?\.(?:jpg|jpeg|png|webp))',
+        html, re.IGNORECASE,
+    )
+    if m:
+        return "https://image.aladin.co.kr" + m.group(1)
+    return None
+
+
+def _try_yes24(title: str, author: str) -> Optional[str]:
+    """Yes24 검색 결과 첫 책의 커버 URL 추출."""
+    import urllib.parse, re, requests
+    q = title + (" " + author if author else "")
+    url = ("https://www.yes24.com/Product/Search?domain=BOOK&"
+           f"query={urllib.parse.quote(q)}")
+    try:
+        html = requests.get(url, timeout=6, headers=_UA).text
+    except Exception:
+        return None
+    # Yes24 커버 호스트 — image.yes24.com 또는 i.yes24.com
+    m = re.search(
+        r'(https?://(?:image|i)\.yes24\.com/goods/\d+/[^"\'\s]+?\.(?:jpg|jpeg|png|webp))',
+        html, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).replace("http://", "https://")
+    return None
+
+
+def _try_google_books(title: str, author: str) -> Optional[str]:
+    """Google Books API 표지 (영문 책 위주)."""
+    import requests
+    try:
         uri = f"https://www.googleapis.com/books/v1/volumes?q=intitle:{title}"
         if author:
             uri += f"+inauthor:{author}"
-        items = http_get(uri, timeout=10).json().get("items", [])
+        items = requests.get(uri, timeout=6, headers=_UA).json().get("items", [])
         for item in items:
             thumb = (item.get("volumeInfo", {})
                          .get("imageLinks", {})
@@ -117,6 +200,27 @@ def _get_cover_url(title: str, author: str) -> Optional[str]:
                 return thumb.replace("http://", "https://")
     except Exception:
         pass
+    return None
+
+
+def _get_cover_url(title: str, author: str) -> Optional[str]:
+    """알라딘 → Yes24 → Google Books 순. 결과는 메모리+디스크 캐싱.
+
+    성공한 URL 만 디스크에 저장(미스는 메모리만 → 다음 세션에 재시도).
+    """
+    key = f"{title}|{author}"
+    if key in _COVER_CACHE:
+        return _COVER_CACHE[key]
+    for fn in (_try_aladin, _try_yes24, _try_google_books):
+        try:
+            url = fn(title, author)
+        except Exception:
+            url = None
+        if url:
+            _COVER_CACHE[key] = url
+            _save_cover_cache()      # hit 만 디스크 영속화
+            return url
+    _COVER_CACHE[key] = None         # 미스는 메모리만 (다음 세션 재시도)
     return None
 
 
@@ -133,7 +237,7 @@ def _find_existing_page(notion, database_id: str, title: str) -> Optional[str]:
             .limit(1)
         )
         data = query.first()
-        return data.id if data else None
+        return str(data.id) if data else None
     except Exception as e:
         print(f"  [경고] 페이지 검색 실패 ({title}): {e}", file=sys.stderr)
         return None
@@ -166,19 +270,104 @@ def _create_page(notion, database_id: str, title: str, author: str,
         url = _get_cover_url(title, author) or NO_COVER_IMG
         notion.pages.set(page, cover=ExternalFile[url])
         if url == NO_COVER_IMG:
-            print(f"  × 표지를 찾을 수 없음 — 플레이스홀더 사용")
+            print(f"  × 표지를 찾을 수 없음 — 플레이스홀더 사용", flush=True)
         else:
-            print(f"  ✓ 표지 추가")
+            print(f"  ✓ 표지 추가 ({url[:60]}…)", flush=True)
 
     return str(page.id)
 
 
-def _append_clippings(notion, page_id: str, formatted: List[str]) -> None:
-    """Append formatted clipping text as Paragraph blocks to an existing page."""
-    page = notion.pages.retrieve(page_id)
+_NOTION_API_VERSION = "2022-06-28"
+
+
+def _append_clippings(notion, page_id: str, formatted: List[str],
+                      notion_token: str = "") -> None:
+    """Append formatted clipping text as Paragraph blocks to an existing page.
+
+    notional 0.8.2 가 생성하는 block payload 에 Notion API 가 거부하는
+    read-only 필드(archived, has_children 등) 가 포함되어
+    "body.children[0].* should be not present" 오류가 난다.
+    따라서 paragraph block 추가는 raw HTTP API 로 직접 호출한다.
+    """
+    import requests
+    if not notion_token:
+        raise RuntimeError("Notion 토큰 누락 — _append_clippings 호출부 확인")
+
+    pid = str(page_id).replace("-", "")
+    headers = {
+        "Authorization":  f"Bearer {notion_token}",
+        "Notion-Version": _NOTION_API_VERSION,
+        "Content-Type":   "application/json",
+    }
+    url = f"https://api.notion.com/v1/blocks/{pid}/children"
+
     full_text = "".join(formatted)
     for chunk in _split_chunks(full_text):
-        notion.blocks.children.append(page, Paragraph[chunk])
+        payload = {
+            "children": [{
+                "object": "block",
+                "type":   "paragraph",
+                "paragraph": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": chunk},
+                    }],
+                },
+            }],
+        }
+        r = requests.patch(url, json=payload, headers=headers, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Notion blocks.children.append 실패 ({r.status_code}): {r.text}"
+            )
+
+
+def _rewrite_page_body(page_id: str, formatted: List[str],
+                       notion_token: str) -> None:
+    """Delete all existing child blocks of a page, then re-append `formatted`.
+
+    본문 전체를 새로 쓴다. 클리핑 텍스트 포맷이 바뀌었을 때(예: 챕터 정보
+    추가) 기존 페이지를 갱신하는 용도. 표지·속성·page_id 는 보존된다.
+    """
+    import requests
+    if not notion_token:
+        raise RuntimeError("Notion 토큰 누락 — _rewrite_page_body 호출부 확인")
+
+    pid = str(page_id).replace("-", "")
+    headers = {
+        "Authorization":  f"Bearer {notion_token}",
+        "Notion-Version": _NOTION_API_VERSION,
+        "Content-Type":   "application/json",
+    }
+
+    # 1. 기존 자식 블록 ID 수집 (페이지네이션)
+    block_ids: List[str] = []
+    cursor = None
+    while True:
+        url = f"https://api.notion.com/v1/blocks/{pid}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"블록 조회 실패 ({r.status_code}): {r.text}")
+        data = r.json()
+        block_ids.extend(b["id"] for b in data.get("results", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    # 2. 전부 삭제
+    for bid in block_ids:
+        bid_clean = bid.replace("-", "")
+        dr = requests.delete(
+            f"https://api.notion.com/v1/blocks/{bid_clean}",
+            headers=headers, timeout=30,
+        )
+        if dr.status_code >= 400:
+            raise RuntimeError(f"블록 삭제 실패 ({dr.status_code}): {dr.text}")
+
+    # 3. 새 본문 추가
+    _append_clippings(None, page_id, formatted, notion_token=notion_token)
 
 
 def _update_page_properties(notion, page_id: str, highlight_count: int,
@@ -204,12 +393,18 @@ def sync_to_notion(
     database_id: str,
     state_path: Path = DEFAULT_STATE,
     enable_book_cover: bool = True,
+    rewrite: bool = False,
 ) -> dict:
     """Sync clippings to a Notion database.
 
     Only uploads clippings not yet in the state file.
     Both KFX+YJR and My Clippings sources share the same state file,
     so the same highlight is never uploaded twice regardless of source.
+
+    rewrite=True 이면 fingerprint dedup 을 무시하고, 각 책의 기존 Notion
+    페이지 본문을 통째로 지운 뒤 전달된 모든 클리핑으로 다시 채운다.
+    클리핑 포맷이 바뀌었을 때(예: 챕터 정보 추가) 백필용. fingerprint
+    상태는 위치 기반이라 그대로 유지된다.
 
     Returns:
         {"added": int, "skipped": int, "books_new": int, "books_updated": int}
@@ -232,7 +427,10 @@ def sync_to_notion(
         })
         synced_fps = set(book_state["synced_fingerprints"])
 
-        new_clips = [c for c in book_clips if fingerprint(c) not in synced_fps]
+        if rewrite:
+            new_clips = list(book_clips)   # 전체 재작성 — dedup 무시
+        else:
+            new_clips = [c for c in book_clips if fingerprint(c) not in synced_fps]
         summary["skipped"] += len(book_clips) - len(new_clips)
 
         if not new_clips:
@@ -257,8 +455,8 @@ def sync_to_notion(
         formatted = [_format_clipping(c) for c in content_clips]
 
         title_author = f"{title} ({author})" if author else title
-        print(title_author)
-        print("-" * len(title_author))
+        print(title_author, flush=True)
+        print("-" * len(title_author), flush=True)
 
         page_id = book_state.get("notion_page_id")
 
@@ -280,11 +478,17 @@ def sync_to_notion(
                 len(all_highlights), last_date, enable_book_cover,
             )
             book_state["notion_page_id"] = page_id
-            _append_clippings(notion, page_id, formatted)
+            _append_clippings(notion, page_id, formatted, notion_token=notion_token)
             summary["books_new"] += 1
-            print(f"  ✓ 새 페이지 생성")
+            print(f"  ✓ 새 페이지 생성", flush=True)
+        elif rewrite:
+            _rewrite_page_body(page_id, formatted, notion_token=notion_token)
+            _update_page_properties(notion, page_id, len(all_highlights), last_date)
+            book_state["notion_page_id"] = page_id
+            summary["books_updated"] += 1
+            print(f"  ↻ 본문 재작성", flush=True)
         else:
-            _append_clippings(notion, page_id, formatted)
+            _append_clippings(notion, page_id, formatted, notion_token=notion_token)
             _update_page_properties(notion, page_id, len(all_highlights), last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
@@ -293,7 +497,9 @@ def sync_to_notion(
             synced_fps.add(fingerprint(c))
         book_state["synced_fingerprints"] = sorted(synced_fps)
         summary["added"] += len(new_clips)
-        print(f"  → {len(new_clips)}개 추가 (skip {len(book_clips) - len(new_clips)})\n")
+        verb = "재작성" if rewrite else "추가"
+        print(f"  → {len(new_clips)}개 {verb} (skip {len(book_clips) - len(new_clips)})\n", flush=True)
+        save_state(state_path, state)   # 책마다 중간 저장 → 중단돼도 진전분 보존
 
     save_state(state_path, state)
     return summary

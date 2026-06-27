@@ -46,7 +46,7 @@ def _recover_from_kfx(clippings: List[Clipping], kfx_path: Path) -> int:
     """한도 초과 클리핑을 KFX 파일에서 복구. 복구 수 반환."""
     import re
 
-    _, kl_offsets, book_text = extract_kfx_info(kfx_path)
+    _, kl_offsets, book_text, _ = extract_kfx_info(kfx_path)
     if not kl_offsets or not book_text:
         return 0
 

@@ -46,13 +46,14 @@ Kindle 기기의 하이라이트·메모·북마크를 여러 형식에서 파�
 | `sync_clippings.py` | 단독 실행 | My Clippings.txt 증분 동기화 (파일 출력 전용) |
 | `recover_clippings.py` | 단독 실행 | My Clippings.txt 한도 초과 텍스트 복구 |
 | `notion_create_db.py` | 1회 실행 | sync_kfx 가 기대하는 스키마로 Notion 데이터베이스 자동 생성 |
+| `notion_refresh_covers.py` | 필요 시 | 기존 Notion 페이지 표지를 알라딘 표지로 일괄 교체(백필) |
 
 ---
 
 ## 대화형 TUI (`tui.py`)
 
-`sync_kfx.py` 의 모든 기능을 키보드로 다룰 수 있는 Textual TUI. Catppuccin Mocha
-팔레트로 256-color 터미널에서 보기 좋게 렌더링된다.
+`sync_kfx.py` 의 모든 기능을 키보드로 다룰 수 있는 Textual TUI. Catppuccin Frappé
+(밝은 다크) 팔레트로 256-color 터미널에서 보기 좋게 렌더링된다.
 
 ```bash
 python tui.py                                # 자동 감지
@@ -82,17 +83,40 @@ python tui.py --kindle "<경로>"              # 경로 직접 지정
 
 ### 클리핑 미리보기
 
-- 좌측 32 칸: **Google Books 표지** (textual-image, Half-block/iTerm2/Kitty 자동 선택)
-- 우측: 클리핑 표 (`# / 타입 / 색 / 페이지 / 위치 / 날짜 / 내용`)
-- 색상: yellow/blue/pink/orange chip 으로 시각화
+- 좌측 32 칸: **책 표지** (알라딘 → Yes24 → Google Books 순으로 검색)
+- 우측: 클리핑 표 (`# / 타입 / 색 / 페이지 / 위치 / 날짜 / 챕터 / 내용`)
+- 타입 아이콘: 하이라이트 `✎`(노랑) / 노트 `✐`(초록) / 위치 `➤`(보라) / 북마크 `🔖`
+- 색상: yellow/blue/pink/orange 등 배경색 chip 으로 시각화
+- **챕터**: KFX 목차에서 추출한 breadcrumb (예: `제1장 › 1. 서론`)
 - 북마크는 의미 없는 단일-문자 텍스트 대신 `—` 표시
-- 내용은 CJK 셀 너비를 인식해 자동 워드랩 (잘림 없음)
+- 내용은 CJK 셀 너비를 인식해 자동 워드랩 (`w` 로 토글)
+- 클리핑 표도 `1`–`7` 로 컬럼 정렬 (`7` = 챕터)
+
+### 표지 렌더링 (터미널 호환성)
+
+터미널에 따라 렌더러를 자동 선택한다. 그래픽 프로토콜 지원 여부가 화질을 좌우:
+
+| 환경 | 렌더러 | 화질 |
+|---|---|---|
+| Ghostty / Kitty / WezTerm (tmux 밖) | Kitty 그래픽(TGP) | 선명 |
+| tmux·screen 안 | half-block(컬러 문자) | 저화질 — 멀티플렉서가 그래픽 escape 차단 |
+| 기타 | AutoImage 자동 탐지 | 터미널에 따름 |
+
+- **tmux 안에서도 선명하게** 하려면: tmux `set -g allow-passthrough on` 후
+  `KINDLE_TUI_IMAGE=tgp python tui.py` 로 강제 (또는 tmux 밖에서 실행)
+- `KINDLE_TUI_IMAGE` 값: `tgp` / `sixel` / `halfcell` / `unicode` / `auto`
+- 표지는 고해상도(알라딘 cover500) 우선, `~/.cache/kindle_covers/` 에 캐싱돼
+  두 번째 열기부터 즉시 표시. URL 은 `~/.kindle_cover_cache.json` 에 캐싱
 
 ### 동기화 모달
 
-- 체크박스: dry-run / 파일 저장 (경로 직접 지정) / Notion 업로드 / 상태 초기화
+- 옵션을 목적별 3개 섹션으로 그룹화:
+  - **출력 대상**: 파일 저장(경로 지정) / Notion 업로드
+  - **실행 모드**: 미리보기(dry-run) / 챕터 정보 다시 쓰기(`--rewrite-bodies`)
+  - **상태 초기화 ⚠**: 로컬(`--reset`) / Notion(`--reset-notion`)
 - 필터 적용 중이면 그 책들만 대상 (`--book` 으로 전달), 아니면 전체
-- `sync_kfx.py --no-progress` 를 subprocess 로 호출, stdout 라인 스트리밍
+- `sync_kfx.py --no-progress` 를 subprocess 로 호출, stdout 라인 스트리밍 (책별 색 구분)
+- **실행 중**: 스피너 + "동기화 중…" 표시, `실행` 버튼 비활성 + `중단` 버튼으로 취소
 - Notion 업로드 사용 시 `NOTION_TOKEN` + `NOTION_DB` 환경변수 필요
 
 ### 제목 캐시
@@ -206,7 +230,7 @@ YJR 파싱 (char offset 기반 클리핑 위치)
 fingerprint 비교 → 신규 항목만 선별
       │
       ▼
-KFX에서 원문·페이지·Kindle Location 추출
+KFX에서 원문·페이지·챕터(목차)·Kindle Location 추출
       │  (kfxlib — Calibre KFX Input 플러그인 필요)
       ▼
 파일 출력 (선택)  +  Notion 업로드 (선택)
@@ -236,7 +260,10 @@ python sync_kfx.py --notion-db $NOTION_DB
 -o FILE                 Notion과 별개로 파일에도 저장
 -f FORMAT               출력 형식: json | csv | markdown | text
 --dry-run               저장 없이 신규 항목 목록만 출력
---reset                 상태 초기화 후 전체 재동기화
+--reset                 로컬 상태 초기화 후 전체 재동기화
+--reset-notion          Notion 상태 파일도 비움 (페이지 중복 주의)
+--rewrite-bodies        이미 동기화된 책도 Notion 페이지 본문을 통째로 다시 씀
+                        (챕터 정보 등 포맷 변경 백필용; fingerprint·표지·속성 보존)
 --list-books            documents/ 의 KFX 책 목록 + 클리핑 상태 출력
 --titles                --list-books 에 KFX 메타데이터로 실제 제목·저자 표시
 --refresh-titles        --titles 캐시 무시하고 강제 재추출

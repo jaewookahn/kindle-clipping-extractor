@@ -204,12 +204,15 @@ def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
         return fallback
 
 
-def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[List[int]], Optional[str]]:
+def extract_kfx_info(
+    kfx_path: Path,
+) -> tuple[Optional[List[tuple]], Optional[List[int]], Optional[str], Optional[List[tuple]]]:
     """
-    Extract page map, Kindle Location boundaries, and book text from a KFX file in one pass.
+    Extract page map, Kindle Location boundaries, book text, and table of
+    contents from a KFX file in one pass.
 
     Returns:
-        (page_map, kindle_loc_offsets, book_text)
+        (page_map, kindle_loc_offsets, book_text, toc)
         page_map: sorted [(page_label, char_offset), …]  or None
         kindle_loc_offsets: sorted [char_offset_for_kl1, char_offset_for_kl2, …]
             Index i (0-based) holds the char offset where Kindle Location (i+1) starts.
@@ -218,11 +221,15 @@ def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[Li
         book_text: full Unicode text of the book with KFX-internal char offsets preserved,
             so book_text[char_offset_start:char_offset_end] gives the exact highlighted text.
             None if extraction fails.
+        toc: sorted [(char_offset, breadcrumb_title), …]  or None
+            breadcrumb_title joins nested chapter titles with " › ".
+            char_offset is in the same coordinate space as a clipping's raw
+            location_start, so map BEFORE fill_clipping_kindle_locations.
 
     Requires the Calibre "KFX Input" plugin to be installed.
     """
     if not _find_kfx_plugin():
-        return None, None, None
+        return None, None, None, None
 
     try:
         with _kfxlib_context():
@@ -239,29 +246,40 @@ def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[Li
                 [entry.pid for entry in loc_info] if loc_info else None
             )
 
-            # --- Publisher page map ---
+            # --- Navigation fragment: page map ($237) + table of contents ($212) ---
             page_map: List[tuple] = []
+            toc: List[tuple] = []
             nav_fragment = book.fragments.get("$389")
             if nav_fragment is not None:
                 for book_navigation in nav_fragment.value:
+                    book_navigation = unannotated(book_navigation)
                     for nav_container in book_navigation.get("$392", []):
                         if ion_type(nav_container) is IonSymbol:
                             nav_container = book.fragments.get(ftype="$391", fid=nav_container)
                         if nav_container is None:
                             continue
                         nav_container = unannotated(nav_container)
-                        if nav_container.get("$235", None) != "$237":  # $237 = page list
-                            continue
-                        for entry in nav_container.get("$247", []):
-                            ep = unannotated(entry)
-                            label = ep.get("$241", {}).get("$244", "")
-                            pos   = ep.get("$246", {})
-                            eid   = pos.get("$155")
-                            eid_offset = pos.get("$143", 0)
-                            pid = book.pid_for_eid(eid, eid_offset, pos_info)
-                            if pid is not None and label:
-                                page_map.append((label, pid))
+                        nav_type = nav_container.get("$235", None)
+
+                        if nav_type == "$237":  # page list
+                            for entry in nav_container.get("$247", []):
+                                ep = unannotated(entry)
+                                label = ep.get("$241", {}).get("$244", "")
+                                pos   = ep.get("$246", {})
+                                eid   = pos.get("$155")
+                                eid_offset = pos.get("$143", 0)
+                                pid = book.pid_for_eid(eid, eid_offset, pos_info)
+                                if pid is not None and label:
+                                    page_map.append((label, pid))
+
+                        elif nav_type == "$212":  # table of contents
+                            _walk_toc(
+                                nav_container.get("$247", []),
+                                book, pos_info, unannotated, toc, parents=[],
+                            )
+
                 page_map.sort(key=lambda x: x[1])
+                toc.sort(key=lambda x: x[0])
 
             # --- Book text with correct KFX char offsets ---
             # collect_content_position_info() returns ContentChunk objects where
@@ -286,11 +304,44 @@ def extract_kfx_info(kfx_path: Path) -> tuple[Optional[List[tuple]], Optional[Li
             except Exception as exc:
                 print(f"  [warn] KFX text extraction failed: {exc}", file=sys.stderr)
 
-            return page_map if page_map else None, kindle_loc_offsets, book_text
+            return (
+                page_map if page_map else None,
+                kindle_loc_offsets,
+                book_text,
+                toc if toc else None,
+            )
 
     except Exception as exc:
         print(f"  [warn] extract_kfx_info failed: {exc}", file=sys.stderr)
-        return None, None, None
+        return None, None, None, None
+
+
+def _walk_toc(entries, book, pos_info, unannotated, out: List[tuple],
+              parents: List[str]) -> None:
+    """Recursively flatten a KFX TOC ($212) into [(char_offset, breadcrumb)].
+
+    Nested chapter titles are joined with ' › ' so each clipping can show its
+    full path. char_offset comes from pid_for_eid — same space as page map.
+    """
+    for entry in entries:
+        ep = unannotated(entry)
+        label = ep.get("$241", {})
+        if isinstance(label, dict):
+            label = label.get("$244", "")
+        label = (label or "").strip()
+
+        path = parents + [label] if label else parents
+
+        pos = ep.get("$246", {})
+        eid = pos.get("$155")
+        if eid is not None and label:
+            pid = book.pid_for_eid(eid, pos.get("$143", 0), pos_info)
+            if pid is not None:
+                out.append((pid, " › ".join(path)))
+
+        children = ep.get("$247", [])
+        if children:
+            _walk_toc(children, book, pos_info, unannotated, out, parents=path)
 
 
 # Keep backward-compatible alias
@@ -323,6 +374,30 @@ def fill_clipping_pages(clippings: List[Clipping], page_map: List[tuple]) -> Non
                 c.page = int(label)
             except ValueError:
                 pass   # non-numeric page labels (e.g. "ix") — skip
+
+
+def fill_clipping_chapters(clippings: List[Clipping], toc: List[tuple]) -> None:
+    """
+    Assign chapter breadcrumbs to clippings using the KFX table of contents.
+
+    toc: sorted list of (char_offset, breadcrumb_title) from extract_kfx_info().
+    For each clipping with a location_start, finds the last TOC entry whose
+    char_offset ≤ location_start.
+    NOTE: location_start must still be a char_offset here (call this BEFORE
+    fill_clipping_kindle_locations, like fill_clipping_pages).
+    """
+    import bisect
+    if not toc:
+        return
+    offsets = [off for off, _ in toc]
+    titles  = [title for _, title in toc]
+
+    for c in clippings:
+        if c.location_start is None or c.chapter is not None:
+            continue
+        idx = bisect.bisect_right(offsets, c.location_start) - 1
+        if idx >= 0:
+            c.chapter = titles[idx]
 
 
 def fill_clipping_kindle_locations(

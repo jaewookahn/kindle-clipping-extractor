@@ -12,6 +12,7 @@ from kindle.ebook import (
     extract_book_text,
     fill_clipping_text,
     fill_clipping_pages,
+    fill_clipping_chapters,
     fill_clipping_kindle_locations,
 )
 from kindle.exporters import export_json, export_csv, export_markdown, export_text
@@ -59,7 +60,7 @@ def _export_from_path(input_path: Path, args) -> None:
 
         if ebook.suffix.lower() == ".kfx":
             print(f"  Extracting text, page map, and Kindle Locations from: {ebook.name} …")
-            page_map, kl_offsets, book_text = extract_kfx_info(ebook)
+            page_map, kl_offsets, book_text, toc = extract_kfx_info(ebook)
 
             if not args.no_text and book_text:
                 before = sum(1 for c in group if c.content and c.content.startswith("["))
@@ -74,6 +75,12 @@ def _export_from_path(input_path: Path, args) -> None:
                 paged = sum(1 for c in group if c.page is not None)
                 print(f"  Assigned page numbers to {paged} clippings "
                       f"(pp. {page_map[0][0]}–{page_map[-1][0]})")
+
+            if not args.no_pages and toc:
+                fill_clipping_chapters(group, toc)
+                chaptered = sum(1 for c in group if c.chapter)
+                print(f"  Assigned chapters to {chaptered} clippings "
+                      f"({len(toc)} TOC entries)")
 
             if not args.no_pages and kl_offsets:
                 fill_clipping_kindle_locations(group, kl_offsets)

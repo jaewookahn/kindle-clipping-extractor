@@ -237,7 +237,7 @@ def main() -> None:
 
     # 2. KFX 분석
     print(f"\nKFX 분석: {ebook_path.name} …")
-    _, kl_offsets, book_text = extract_kfx_info(ebook_path)
+    _, kl_offsets, book_text, _ = extract_kfx_info(ebook_path)
 
     if not kl_offsets or not book_text:
         print("텍스트 또는 Location 맵 추출 실패. 종료합니다.", file=sys.stderr)

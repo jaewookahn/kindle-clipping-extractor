@@ -63,6 +63,7 @@ from kindle.ebook import (
     extract_kfx_info,
     fill_clipping_text,
     fill_clipping_pages,
+    fill_clipping_chapters,
     fill_clipping_kindle_locations,
 )
 from kindle.exporters import (
@@ -392,7 +393,7 @@ def process_book(
     # 3. KFX 텍스트·페이지·KL 번호 추출
     pbar.set_postfix_str(f"{real_title[:40]}  KFX 추출", refresh=True)
     with _capture_stderr_to_log(real_title):
-        page_map, kl_offsets, book_text = extract_kfx_info(kfx_path)
+        page_map, kl_offsets, book_text, toc = extract_kfx_info(kfx_path)
 
     if book_text:
         fill_clipping_text(new_clips, book_text)
@@ -401,6 +402,9 @@ def process_book(
 
     if page_map:
         fill_clipping_pages(new_clips, page_map)
+
+    if toc:
+        fill_clipping_chapters(new_clips, toc)
 
     if kl_offsets:
         fill_clipping_kindle_locations(new_clips, kl_offsets)
@@ -497,11 +501,20 @@ def run_pipeline(args) -> int:
     state_path = Path(args.state)
     if args.reset:
         state = {"last_sync": None, "total_synced": 0, "seen_keys": []}
-        print("상태 초기화 — 전체 재동기화")
+        print("로컬 상태 초기화 — 전체 재동기화")
     else:
         state = load_state(state_path)
         if state["last_sync"]:
             print(f"마지막 동기화: {state['last_sync']}  (누적 {state['total_synced']}개)")
+
+    # Notion 상태 reset
+    if args.reset_notion:
+        nstate_path = Path(args.notion_state)
+        if nstate_path.exists():
+            nstate_path.unlink()
+            print(f"Notion 상태 초기화: {nstate_path} 삭제됨")
+        else:
+            print(f"Notion 상태 파일 없음 (skip): {nstate_path}")
 
     seen_keys: Set[str] = set(state.get("seen_keys", []))
 
@@ -525,9 +538,11 @@ def run_pipeline(args) -> int:
         disable=no_progress,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
     ) as pbar:
+        # rewrite-bodies: dedup 무시하고 전체 클리핑을 다시 끌어온다
+        effective_seen = set() if args.rewrite_bodies else seen_keys
         for i, (kfx, sdr, stem) in enumerate(pbar, 1):
             new_clips, new_fps, real_title, author, skipped = process_book(
-                kfx, sdr, stem, seen_keys, pbar, title_cache=title_cache,
+                kfx, sdr, stem, effective_seen, pbar, title_cache=title_cache,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
@@ -599,6 +614,7 @@ def run_pipeline(args) -> int:
             database_id=args.notion_db,
             state_path=Path(args.notion_state),
             enable_book_cover=not args.no_cover,
+            rewrite=args.rewrite_bodies,
         )
         print(
             f"Notion 완료: 추가 {result['added']}개 / skip {result['skipped']}개"
@@ -661,7 +677,15 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true",
                         help="신규 목록만 출력, 파일 저장 및 상태 업데이트 없음")
     parser.add_argument("--reset", action="store_true",
-                        help="상태 파일 초기화 후 전체 재동기화")
+                        help="로컬 KFX 상태 파일 초기화 후 전체 재동기화")
+    parser.add_argument("--reset-notion", action="store_true",
+                        help="Notion 측 상태 파일도 비움 (--notion-state). "
+                             "주의: 기존 Notion 페이지에 클리핑이 재추가되어 "
+                             "중복될 수 있음. 페이지 미리 삭제 권장.")
+    parser.add_argument("--rewrite-bodies", action="store_true",
+                        help="이미 동기화된 책도 Notion 페이지 본문을 통째로 다시 씀 "
+                             "(챕터 정보 등 포맷 변경 백필용). fingerprint·표지·"
+                             "속성은 보존. dedup 무시하고 전체 클리핑 재업로드.")
     parser.add_argument("--list-books", action="store_true",
                         help="documents/ 의 KFX 책 목록 + 클리핑 상태 출력 후 종료")
     parser.add_argument("--no-progress", action="store_true",

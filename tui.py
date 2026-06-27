@@ -28,7 +28,8 @@ from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen  import ModalScreen
 from textual.widgets import (
-    Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Static,
+    Button, Checkbox, DataTable, Footer, Header, Input, Label, LoadingIndicator,
+    RichLog, Static,
 )
 
 from datetime import datetime
@@ -48,6 +49,7 @@ from kindle.ebook import (
     extract_kfx_info,
     fill_clipping_text,
     fill_clipping_pages,
+    fill_clipping_chapters,
     fill_clipping_kindle_locations,
 )
 
@@ -71,30 +73,30 @@ def _display_width(s: str) -> int:
 
 # === Catppuccin Mocha 팔레트 ==============================================
 class CAT:
-    base       = "#1e1e2e"
-    mantle     = "#181825"
-    crust      = "#11111b"
-    surface0   = "#313244"
-    surface1   = "#45475a"
-    surface2   = "#585b70"
-    overlay0   = "#6c7086"
-    overlay1   = "#7f849c"
-    overlay2   = "#9399b2"
-    subtext0   = "#a6adc8"
-    subtext1   = "#bac2de"
-    text       = "#cdd6f4"
-    lavender   = "#b4befe"
-    blue       = "#89b4fa"
-    sapphire   = "#74c7ec"
-    sky        = "#89dceb"
-    teal       = "#94e2d5"
-    green      = "#a6e3a1"
-    yellow     = "#f9e2af"
-    peach      = "#fab387"
-    maroon     = "#eba0ac"
-    red        = "#f38ba8"
-    mauve      = "#cba6f7"
-    pink       = "#f5c2e7"
+    base       = "#303446"
+    mantle     = "#292c3c"
+    crust      = "#232634"
+    surface0   = "#414559"
+    surface1   = "#51576d"
+    surface2   = "#626880"
+    overlay0   = "#737994"
+    overlay1   = "#838ba7"
+    overlay2   = "#949cbb"
+    subtext0   = "#a5adce"
+    subtext1   = "#b5bfe2"
+    text       = "#c6d0f5"
+    lavender   = "#babbf1"
+    blue       = "#8caaee"
+    sapphire   = "#85c1dc"
+    sky        = "#99d1db"
+    teal       = "#81c8be"
+    green      = "#a6d189"
+    yellow     = "#e5c890"
+    peach      = "#ef9f76"
+    maroon     = "#ea999c"
+    red        = "#e78284"
+    mauve      = "#ca9ee6"
+    pink       = "#f4b8e4"
 
 
 # ---------------------------------------------------------------------------
@@ -102,27 +104,22 @@ class CAT:
 # ---------------------------------------------------------------------------
 
 class AppLogo(Static):
-    """좌측에 그라데이션 로고, 우측에 sub_title 안내."""
+    """좌측에 미니멀 워드마크, 우측에 sub_title 안내."""
 
     sub = reactive[str]("")
 
     def render(self) -> str:
-        # 글자별 그라데이션 (lavender → mauve → pink)
-        word = " ✦ KINDLE  CLIPPING ✦ "
-        grad = [CAT.lavender, CAT.lavender, CAT.blue, CAT.sapphire,
-                CAT.sky, CAT.teal, CAT.green, CAT.yellow, CAT.peach,
-                CAT.maroon, CAT.red, CAT.mauve, CAT.pink, CAT.pink]
-        colored = []
-        for i, ch in enumerate(word):
-            c = grad[i % len(grad)]
-            colored.append(f"[{c} b]{ch}[/]")
-        logo = "".join(colored)
-        hint = f"[{CAT.subtext0}]{self.sub}[/]" if self.sub else ""
-        return f"{logo}   {hint}"
+        logo = (
+            f"[{CAT.mauve} b]◆[/] "
+            f"[{CAT.lavender} b]Kindle[/] "
+            f"[{CAT.subtext1} b]Clipping[/]"
+        )
+        hint = f"[{CAT.overlay1}]{self.sub}[/]" if self.sub else ""
+        return f"{logo}    {hint}"
 
 
 class StatusBar(Static):
-    """Kindle 경로 + sync 현황. 2줄, chip 스타일."""
+    """Kindle 경로 + sync 현황. 2줄, 미니멀 스타일."""
 
     kindle_path  = reactive[str]("")
     total_books  = reactive[int](0)
@@ -131,35 +128,23 @@ class StatusBar(Static):
     last_sync    = reactive[str]("never")
 
     @staticmethod
-    def _chip(label: str, value, fg_label: str, bg_label: str,
-              fg_value: str, bg_value: str) -> str:
-        # 좌측 라벨 / 우측 값 두-톤 chip + 라운드 모서리
-        return (
-            f"[{fg_label} on {bg_label} b]  {label}  [/]"
-            f"[{fg_value} on {bg_value} b] {value:>3} [/]"
-        )
+    def _stat(label: str, value, color: str) -> str:
+        # 라벨은 흐리게, 값은 컬러 — 군더더기 없는 인라인 통계
+        return f"[{CAT.overlay1}]{label}[/] [{color} b]{value}[/]"
 
     def render(self) -> str:
-        path = self.kindle_path or f"[{CAT.red}]미감지 — k 키로 선택[/]"
+        path = self.kindle_path or f"[{CAT.red}]미감지 — [b]k[/b] 키로 선택[/]"
         line1 = (
-            f"[{CAT.mauve} b]▎[/]"
-            f"[{CAT.lavender} b] DEVICE [/]"
-            f"[{CAT.subtext1}] {path}[/]"
+            f"[{CAT.lavender} b]DEVICE[/]   "
+            f"[{CAT.subtext1}]{path}[/]"
         )
-        chips = "  ".join([
-            self._chip("BOOKS",  self.total_books,
-                       CAT.base, CAT.blue,  CAT.blue,  CAT.surface0),
-            self._chip("CLIPS",  self.with_clips,
-                       CAT.base, CAT.green, CAT.green, CAT.surface0),
-            self._chip("NOTION", self.notion_books,
-                       CAT.base, CAT.mauve, CAT.mauve, CAT.surface0),
+        line2 = "    ".join([
+            self._stat("BOOKS",  self.total_books,  CAT.blue),
+            self._stat("CLIPS",  self.with_clips,   CAT.green),
+            self._stat("NOTION", self.notion_books, CAT.mauve),
+            f"[{CAT.overlay0}]│[/]  "
+            f"[{CAT.overlay1}]last sync[/] [{CAT.sapphire}]{self.last_sync}[/]",
         ])
-        line2 = (
-            f"  {chips}   "
-            f"[{CAT.overlay0}]│[/] "
-            f"[{CAT.subtext0}]last sync[/] "
-            f"[{CAT.sapphire}]{self.last_sync}[/]"
-        )
         return f"{line1}\n{line2}"
 
 
@@ -180,6 +165,7 @@ class ClippingPreview(ModalScreen):
         Binding("4",      "sort_clip('page')",   "페이지",show=False),
         Binding("5",      "sort_clip('loc')",    "위치",  show=False),
         Binding("6",      "sort_clip('date')",   "날짜",  show=False),
+        Binding("7",      "sort_clip('chapter')","챕터",  show=False),
     ]
 
     SORT_KEYS = {
@@ -189,26 +175,27 @@ class ClippingPreview(ModalScreen):
         "page":  lambda c: c.page if c.page else 0,
         "loc":   lambda c: c.location_start if c.location_start is not None else 0,
         "date":  lambda c: c.added_date or "",
+        "chapter": lambda c: c.chapter or "",
     }
 
     CSS = """
     ClippingPreview { align: center middle; }
     #preview-box {
         width: 95%; height: 92%;
-        border: thick #cba6f7;
-        background: #1e1e2e;
+        border: round #626880;
+        background: #303446;
         padding: 1 2;
     }
     #preview-header {
         dock: top;
         height: 3;
-        background: #313244;
+        background: #292c3c;
     }
     #preview-title {
         width: 1fr;
         height: 3;
         content-align: center middle;
-        color: #f5c2e7;
+        color: #f4b8e4;
         text-style: bold;
     }
     #toolbar {
@@ -221,48 +208,51 @@ class ClippingPreview(ModalScreen):
         width: 14;
         height: 1;
         border: none;
-        background: #45475a;
-        color: #cdd6f4;
+        background: #51576d;
+        color: #c6d0f5;
         margin-top: 1;
     }
-    Button#wrap-toggle:hover { background: #585b70; }
-    Button#wrap-toggle.-wrap-on  { background: #a6e3a1; color: #1e1e2e; text-style: bold; }
-    Button#wrap-toggle.-wrap-off { background: #45475a; color: #cdd6f4; }
+    Button#wrap-toggle:hover { background: #626880; }
+    Button#wrap-toggle.-wrap-on  { background: #a6d189; color: #303446; text-style: bold; }
+    Button#wrap-toggle.-wrap-off { background: #51576d; color: #c6d0f5; }
     #preview-body {
         height: 1fr;
         margin-top: 1;
     }
     #cover-panel {
         width: 32;
-        border: round #45475a;
-        background: #181825;
+        border: round #51576d;
+        background: #292c3c;
         padding: 1;
-        align: center middle;
+        align: center top;
     }
-    #cover-image { width: 100%; height: 1fr; }
+    /* 표지 자리(플레이스홀더 Static·실제 Image 공통) — id 가 아니라 class 로
+       크기를 줘서, 위젯 교체 시 id 충돌(DuplicateIds) 없이 같은 레이아웃 유지.
+       height 를 1fr 로 두면 책 표지(2:3)가 세로로 늘어나므로 고정 높이 사용. */
+    #cover-panel > .cover { width: 100%; height: 22; }
     #cover-caption {
         dock: bottom;
         height: 1;
         content-align: center middle;
-        color: #6c7086;
+        color: #737994;
     }
     #preview-table {
         width: 1fr;
         margin-left: 1;
-        border: round #45475a;
-        background: #181825;
-        scrollbar-color: #cba6f7 #11111b;
+        border: round #51576d;
+        background: #292c3c;
+        scrollbar-color: #ca9ee6 #232634;
     }
     #preview-table > .datatable--header {
-        background: #313244;
-        color: #cba6f7;
+        background: #414559;
+        color: #ca9ee6;
         text-style: bold;
     }
     #preview-table > .datatable--cursor {
-        background: #cba6f7 30%;
+        background: #ca9ee6 30%;
     }
-    #preview-table > .datatable--odd-row { background: #1e1e2e; }
-    #preview-table > .datatable--even-row { background: #181825; }
+    #preview-table > .datatable--odd-row { background: #303446; }
+    #preview-table > .datatable--even-row { background: #292c3c; }
     """
 
     def __init__(self, book: dict) -> None:
@@ -286,7 +276,7 @@ class ClippingPreview(ModalScreen):
                     yield Button("⏎ wrap: ON", id="wrap-toggle", classes="-wrap-on")
             with Horizontal(id="preview-body"):
                 with Vertical(id="cover-panel"):
-                    yield Static("[dim]표지 로드 중…[/dim]", id="cover-image")
+                    yield Static("[dim]표지 로드 중…[/dim]", id="cover-image", classes="cover")
                     yield Static("", id="cover-caption")
                 yield DataTable(id="preview-table", cursor_type="row", zebra_stripes=True)
 
@@ -298,6 +288,7 @@ class ClippingPreview(ModalScreen):
         table.add_column("페이지", width=6)
         table.add_column("위치",  width=12)
         table.add_column("날짜",  width=16)
+        table.add_column("챕터",  width=22)
         table.add_column("내용",  width=80)
         table.loading = True
         self.run_worker(self._load_clippings, thread=True, exclusive=True)
@@ -323,7 +314,7 @@ class ClippingPreview(ModalScreen):
 
         if clips:
             try:
-                page_map, kl_offsets, book_text = extract_kfx_info(self.book["kfx"])
+                page_map, kl_offsets, book_text, toc = extract_kfx_info(self.book["kfx"])
                 if book_text:
                     fill_clipping_text(clips, book_text)
                 else:
@@ -331,6 +322,8 @@ class ClippingPreview(ModalScreen):
                                   "→ 하이라이트 텍스트가 비어 보일 수 있음")
                 if page_map:
                     fill_clipping_pages(clips, page_map)
+                if toc:
+                    fill_clipping_chapters(clips, toc)
                 if kl_offsets:
                     fill_clipping_kindle_locations(clips, kl_offsets)
                 else:
@@ -342,8 +335,29 @@ class ClippingPreview(ModalScreen):
         # Textual이 인자 없이 호출하는 경우가 있다. 안전한 이름 사용.
         self.app.call_from_thread(lambda: self._show_clips(clips, errors))
 
+    # 표지 이미지 디스크 캐시 — 한 번 받은 파일을 재사용해 두 번째 열기부터 즉시 표시
+    _COVER_DIR = Path.home() / ".cache" / "kindle_covers"
+
+    @classmethod
+    def _hi_res(cls, url: str) -> str:
+        """알라딘 cover200(200px) → cover500(500px) 으로 승격해 선명도 향상."""
+        return url.replace("/cover200/", "/cover500/") if "/cover200/" in url else url
+
+    def _cached_download(self, url: str) -> Optional[Path]:
+        """url 을 디스크 캐시에 받아 경로 반환. 캐시 hit 시 네트워크 생략."""
+        import hashlib, requests
+        self._COVER_DIR.mkdir(parents=True, exist_ok=True)
+        ext = (Path(url).suffix or ".jpg").split("?")[0]
+        dest = self._COVER_DIR / (hashlib.sha1(url.encode()).hexdigest() + ext)
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        dest.write_bytes(r.content)
+        return dest
+
     def _load_cover(self) -> None:
-        """Google Books 표지 URL → 임시 파일 → Image 위젯 교체."""
+        """표지 URL → (고해상도 우선) 디스크 캐시 다운로드 → Image 위젯 교체."""
         try:
             url = _get_cover_url(self.book["title"], self.book["author"])
         except Exception as e:
@@ -353,23 +367,25 @@ class ClippingPreview(ModalScreen):
             return
         if not url:
             self.app.call_from_thread(
-                lambda: self._show_cover_text(
-                    "[dim](Google Books에서 표지 못 찾음)[/dim]"
-                )
+                lambda: self._show_cover_text("[dim](표지를 찾지 못함)[/dim]")
             )
             return
-        try:
-            import tempfile, requests
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            tmp = Path(tempfile.mkdtemp(prefix="kindle_cover_")) / "cover.jpg"
-            tmp.write_bytes(r.content)
-        except Exception as e:
+        # 고해상도(cover500) 우선, 실패 시 원본(cover200)로 폴백
+        path = None
+        for candidate in (self._hi_res(url), url):
+            try:
+                path = self._cached_download(candidate)
+                if path:
+                    url = candidate
+                    break
+            except Exception:
+                continue
+        if path is None:
             self.app.call_from_thread(
-                lambda e=e: self._show_cover_text(f"[red]다운로드 실패: {e}[/red]")
+                lambda: self._show_cover_text("[red]표지 다운로드 실패[/red]")
             )
             return
-        self.app.call_from_thread(lambda p=tmp, u=url: self._swap_in_image(p, u))
+        self.app.call_from_thread(lambda p=path, u=url: self._swap_in_image(p, u))
 
     def _show_cover_text(self, text: str) -> None:
         try:
@@ -377,21 +393,68 @@ class ClippingPreview(ModalScreen):
         except Exception:
             pass
 
+    @staticmethod
+    def _image_widget_cls():
+        """터미널 환경에 맞는 textual-image 위젯 클래스 선택.
+
+        tmux/screen 안에서는 Kitty(TGP)·Sixel 같은 그래픽 프로토콜 escape 가
+        멀티플렉서에 먹혀 빈 화면이 된다. 이 경우 컬러 문자(half-block)로
+        그리는 HalfcellImage 로 폴백 — 저화질이지만 어디서나 보인다.
+        그래픽 가능한 순수 터미널이면 AutoImage 로 고화질.
+
+        KINDLE_TUI_IMAGE=tgp|sixel|halfcell|unicode|auto 로 강제 지정 가능
+        (예: tmux passthrough 설정한 사용자가 'tgp' 로 고화질 강제).
+        """
+        import os
+        from textual_image.widget import (
+            AutoImage, HalfcellImage, UnicodeImage, TGPImage, SixelImage,
+        )
+        override = os.environ.get("KINDLE_TUI_IMAGE", "").lower()
+        forced = {
+            "tgp": TGPImage, "kitty": TGPImage, "sixel": SixelImage,
+            "halfcell": HalfcellImage, "half": HalfcellImage,
+            "unicode": UnicodeImage, "auto": AutoImage,
+        }.get(override)
+        if forced:
+            return forced
+        term = os.environ.get("TERM", "").lower()
+        prog = os.environ.get("TERM_PROGRAM", "").lower()
+        in_mux = bool(os.environ.get("TMUX")) or "tmux" in term or "screen" in term
+        if in_mux:
+            # 멀티플렉서는 그래픽 escape 를 차단 → 컬러 문자 폴백
+            return HalfcellImage
+        # Kitty 그래픽 프로토콜(TGP) 지원이 확실한 터미널은 직접 TGP 강제.
+        # AutoImage 의 런타임 탐지는 Textual 이 stdin 을 점유하면 실패해
+        # 저화질 half-cell 로 떨어지는 일이 잦다.
+        kitty_capable = (
+            bool(os.environ.get("KITTY_WINDOW_ID"))
+            or bool(os.environ.get("GHOSTTY_RESOURCES_DIR"))
+            or bool(os.environ.get("GHOSTTY_BIN_DIR"))
+            or bool(os.environ.get("WEZTERM_EXECUTABLE"))
+            or "kitty" in term or "ghostty" in term
+            or prog in ("ghostty", "wezterm", "kitty")
+        )
+        if kitty_capable:
+            return TGPImage
+        return AutoImage
+
     def _swap_in_image(self, path: Path, url: str) -> None:
         """기존 #cover-image 위젯 제거 후 그 자리에 textual-image Image 마운트."""
         try:
-            from textual_image.widget import Image
+            ImageCls = self._image_widget_cls()
         except Exception as e:
             self._show_cover_text(f"[red]textual-image 로드 실패: {e}[/red]")
             return
         try:
             panel   = self.query_one("#cover-panel", Vertical)
             caption = self.query_one("#cover-caption", Static)
-            old     = self.query_one("#cover-image")
-            old.remove()
-            img = Image(str(path), id="cover-image")
-            # caption은 dock:bottom 이므로 mount 순서 무관
+            # 새 이미지를 먼저 마운트(class 로 크기 지정, id 없음 → 충돌 없음)한 뒤
+            # 플레이스홀더를 제거. remove() 가 async 라 같은 id 재사용 시
+            # DuplicateIds 로 mount 가 실패하던 버그를 피한다.
+            img = ImageCls(str(path), classes="cover")
             panel.mount(img)
+            for old in panel.query("#cover-image"):
+                old.remove()
             caption.update(f"[dim]{_truncate(url, 24)}[/dim]")
         except Exception as e:
             self._show_cover_text(f"[red]이미지 위젯 실패: {e}[/red]")
@@ -399,11 +462,13 @@ class ClippingPreview(ModalScreen):
     # YJR이 content 앞에 "[yellow] ..." 같은 prefix를 붙임. 분리해서 색 컬럼으로.
     _COLOR_RE = __import__("re").compile(r"^\[([a-zA-Z]+)\]\s*(.*)", flags=__import__("re").DOTALL)
 
+    # 이모지는 마크업으로 색을 못 바꾸므로(터미널 고정 색) 색 제어가 되는
+    # 텍스트 글리프 사용. 타입별로 색을 달리해 한눈에 구분.
     _TYPE_ICON = {
-        "highlight":     "🖍️",
-        "bookmark":      "🔖",
-        "note":          "📝",
-        "last_position": "📍",
+        "highlight":     f"[{CAT.yellow} b]✎[/]",   # 노란 펜
+        "bookmark":      "🔖",                        # 원래 이모지 유지
+        "note":          f"[{CAT.green} b]✐[/]",     # 초록 노트
+        "last_position": f"[{CAT.mauve} b]➤[/]",     # 보라 위치
     }
     # 색 이름은 글자로 보여주되 배경색을 칠해서 식별
     _COLOR_BG = {
@@ -467,9 +532,9 @@ class ClippingPreview(ModalScreen):
             if self.errors:
                 for e in self.errors:
                     cell, h = self._content_cell(f"[red]{e}[/red]", markup=True)
-                    table.add_row("!", "-", "-", "-", "-", "-", cell, height=h)
+                    table.add_row("!", "-", "-", "-", "-", "-", "-", cell, height=h)
             else:
-                table.add_row("-", "-", "-", "-", "-", "-", "(클리핑 없음)")
+                table.add_row("-", "-", "-", "-", "-", "-", "-", "(클리핑 없음)")
             return
         if self.errors:
             self.notify(" / ".join(self.errors), severity="warning", timeout=6)
@@ -500,6 +565,13 @@ class ClippingPreview(ModalScreen):
                 height = 1
 
             type_cell = self._TYPE_ICON.get(c.clip_type, c.clip_type)
+
+            from rich.text import Text
+            chapter_cell = Text(
+                c.chapter or "-",
+                no_wrap=True, overflow="ellipsis",
+                style=CAT.subtext0 if c.chapter else CAT.overlay0,
+            )
             table.add_row(
                 str(i),
                 type_cell,
@@ -507,6 +579,7 @@ class ClippingPreview(ModalScreen):
                 page,
                 loc,
                 date,
+                chapter_cell,
                 content_cell,
                 height=height,
             )
@@ -541,7 +614,7 @@ class ClippingPreview(ModalScreen):
         if event.data_table.id != "preview-table":
             return
         idx_to_key = {0: "idx", 1: "type", 2: "color",
-                      3: "page", 4: "loc", 5: "date"}
+                      3: "page", 4: "loc", 5: "date", 6: "chapter"}
         key = idx_to_key.get(event.column_index)
         if key:
             self.action_sort_clip(key)
@@ -562,32 +635,32 @@ class KindlePicker(ModalScreen):
     KindlePicker { align: center middle; }
     #picker-box {
         width: 90%; height: 60%;
-        border: thick #cba6f7;
-        background: #1e1e2e;
+        border: round #626880;
+        background: #303446;
         padding: 1 2;
     }
     #picker-title {
         dock: top;
         height: 2;
         content-align: center middle;
-        background: #313244;
-        color: #89dceb;
+        background: #292c3c;
+        color: #99d1db;
         text-style: bold;
         padding: 0 1;
     }
     #picker-table {
         height: 1fr;
         margin-top: 1;
-        border: round #45475a;
-        background: #181825;
+        border: round #51576d;
+        background: #292c3c;
     }
     #picker-table > .datatable--header {
-        background: #313244;
-        color: #89dceb;
+        background: #414559;
+        color: #99d1db;
         text-style: bold;
     }
     #picker-table > .datatable--cursor {
-        background: #89dceb 30%;
+        background: #99d1db 30%;
     }
     """
 
@@ -636,68 +709,132 @@ class SyncOptions(ModalScreen):
     """sync_kfx 호출 옵션 선택 → subprocess로 실행, 출력 스트리밍."""
 
     BINDINGS = [
-        Binding("escape", "dismiss", "닫기"),
+        Binding("escape", "try_close", "닫기"),
     ]
+
+    running = reactive(False)
 
     CSS = """
     SyncOptions { align: center middle; }
     #sync-box {
-        width: 92%; height: 92%;
-        border: thick #cba6f7;
-        background: #1e1e2e;
-        padding: 1 2;
+        width: 88%; height: 88%;
+        max-width: 120;
+        border: round #626880;
+        background: #303446;
+        padding: 1 3;
+    }
+    #sync-heading {
+        dock: top;
+        height: 1;
+        color: #ca9ee6;
+        text-style: bold;
+        margin-bottom: 1;
     }
     #sync-form {
         dock: top;
         height: auto;
-        max-height: 20;
-        padding: 1 1;
-        background: #181825;
-        border-bottom: heavy #cba6f7;
+        max-height: 60%;
+        overflow-y: auto;
+        padding: 0 1;
     }
-    #file-row { height: 3; }
-    #file-row > Label { width: 8; padding-top: 1; color: #cdd6f4; text-style: none; }
-    #file-row Input {
-        width: 1fr;
-        background: #313244;
-        color: #cdd6f4;
-        border: round #45475a;
+    #scope-label {
+        color: #b5bfe2;
+        margin-bottom: 1;
+        padding: 0 1;
+        background: #292c3c;
     }
-    #file-row Input:focus { border: round #cba6f7; }
-    /* sync-form 직속 Label 만 강조 (Checkbox 내부 Label 안 건드림) */
-    #sync-form > Label {
-        color: #89dceb;
+    /* 섹션 헤더 — 옵션을 목적별로 묶어 한눈에 구분 */
+    #sync-form .section {
+        color: #99d1db;
         text-style: bold;
+        margin-top: 1;
+    }
+    #sync-form .section-danger {
+        color: #e78284;
+        text-style: bold;
+        margin-top: 1;
+    }
+    #sync-form .hint {
+        color: #737994;
+        margin-left: 3;
         margin-bottom: 1;
     }
+    /* 체크박스 1줄로 압축 — 기본 border 가 3줄을 먹어 옵션이 잘리던 문제 해결.
+       내부 .toggle--* 컴포넌트는 건드리지 않음(렌더 깨짐 방지). */
+    #sync-form Checkbox {
+        height: 1;
+        border: none;
+        background: transparent;
+        padding: 0;
+        margin: 0 0 0 2;
+    }
+    #file-row { height: 1; margin: 0 0 0 5; }
+    #file-row > Label { width: 6; color: #a5adce; }
+    #file-row Input {
+        width: 1fr;
+        height: 1;
+        background: #292c3c;
+        color: #c6d0f5;
+        border: none;
+        padding: 0 1;
+    }
+    #file-row Input:focus { background: #3a3f52; }
     #sync-log {
         height: 1fr;
-        border: round #45475a;
+        margin-top: 1;
+        border: round #414559;
         padding: 0 1;
-        background: #11111b;
-        color: #cdd6f4;
-        scrollbar-color: #cba6f7 #11111b;
+        background: #232634;
+        color: #c6d0f5;
+        scrollbar-color: #ca9ee6 #232634;
     }
     #sync-buttons {
         dock: bottom;
         height: 3;
         align: center middle;
-        background: #1e1e2e;
+        padding-top: 1;
     }
+    /* 실행 중에만 보이는 스피너 + 상태 텍스트 */
+    #sync-spin {
+        display: none;
+        width: 6;
+        height: 1;
+        color: #ca9ee6;
+    }
+    #sync-status {
+        display: none;
+        width: auto;
+        height: 1;
+        margin: 0 2 0 0;
+        color: #99d1db;
+        content-align: left middle;
+    }
+    #sync-buttons.-running #sync-spin   { display: block; }
+    #sync-buttons.-running #sync-status { display: block; }
     #sync-buttons Button {
         margin: 0 1;
-        background: #313244;
-        color: #cdd6f4;
-        border: tall #45475a;
+        min-width: 14;
+        background: #414559;
+        color: #c6d0f5;
+        border: none;
     }
+    #sync-buttons Button:hover { background: #51576d; }
     #sync-buttons Button#run {
-        background: #a6e3a1;
-        color: #1e1e2e;
+        background: #a6d189;
+        color: #303446;
         text-style: bold;
-        border: tall #94e2d5;
     }
-    #sync-buttons Button#run:hover { background: #94e2d5; }
-
+    #sync-buttons Button#run:hover { background: #81c8be; }
+    #sync-buttons Button#run:disabled {
+        background: #414559;
+        color: #737994;
+        text-style: none;
+    }
+    #sync-buttons Button#close.-cancel {
+        background: #e78284;
+        color: #303446;
+        text-style: bold;
+    }
     """
 
     def __init__(
@@ -713,52 +850,132 @@ class SyncOptions(ModalScreen):
         self._proc = None
 
     def compose(self) -> ComposeResult:
+        has_env = bool(os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_DB"))
         with Vertical(id="sync-box"):
+            yield Label("동기화", id="sync-heading")
             with Vertical(id="sync-form"):
-                yield Label(f"[b]대상[/b]: {self.scope_label}  ({len(self.scope_books)}권)")
-                yield Checkbox(
-                    "dry-run (목록만, 파일·Notion·상태 모두 저장 안 함)",
-                    id="opt-dry", value=False,
+                yield Label(
+                    f"대상  [b]{self.scope_label}[/b]   ·   {len(self.scope_books)}권",
+                    id="scope-label",
                 )
+
+                yield Label("출력 대상", classes="section")
                 yield Checkbox("파일로 저장", id="opt-file", value=True)
                 with Horizontal(id="file-row"):
-                    yield Label("경로:")
+                    yield Label("경로")
                     yield Input(
                         value=str(Path("kindle_sync.json").resolve()),
-                        placeholder="확장자로 형식 결정 (.json/.csv/.md/.txt)",
+                        placeholder=".json / .csv / .md / .txt — 확장자로 형식 결정",
                         id="opt-file-path",
                     )
-                yield Checkbox(
-                    f"Notion 업로드 (NOTION_TOKEN, NOTION_DB 환경변수 필요)",
-                    id="opt-notion",
-                    value=bool(os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_DB")),
-                )
-                yield Checkbox("상태 초기화 (--reset, 전체 재동기화)", id="opt-reset")
+                yield Checkbox("Notion 데이터베이스에 업로드", id="opt-notion", value=has_env)
+                if not has_env:
+                    yield Label("NOTION_TOKEN·NOTION_DB 환경변수 필요", classes="hint")
+
+                yield Label("실행 모드", classes="section")
+                yield Checkbox("미리보기만 — 아무것도 저장 안 함 (dry-run)", id="opt-dry")
+                yield Checkbox("챕터 정보 다시 쓰기 — 기존 페이지 본문 재작성", id="opt-rewrite")
+
+                yield Label("상태 초기화  ⚠ 주의", classes="section-danger")
+                yield Checkbox("로컬 동기화 상태 비우기 (--reset)", id="opt-reset")
+                yield Checkbox("Notion 동기화 상태 비우기 (--reset-notion)", id="opt-reset-notion")
+
             yield RichLog(id="sync-log", highlight=True, markup=True, wrap=False)
             with Horizontal(id="sync-buttons"):
-                yield Button("실행", id="run", variant="primary")
+                yield LoadingIndicator(id="sync-spin")
+                yield Static("", id="sync-status")
+                yield Button("▶  실행", id="run")
                 yield Button("닫기", id="close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "close":
-            self.dismiss()
-            return
         if event.button.id == "run":
-            self._start_run()
+            if not self.running:
+                self._start_run()
+            return
+        if event.button.id == "close":
+            if self.running:
+                self._cancel()      # 실행 중 → 중단
+            else:
+                self.dismiss()
+
+    # -- 실행 상태 관리 ---------------------------------------------------
+    def watch_running(self, running: bool) -> None:
+        """running 토글 시 버튼 외형/동작 전환 (실행 그레이아웃 + 중단 노출)."""
+        try:
+            run_btn   = self.query_one("#run",   Button)
+            close_btn = self.query_one("#close", Button)
+        except Exception:
+            return
+        run_btn.disabled = running
+        if running:
+            close_btn.label = "■  중단"
+            close_btn.add_class("-cancel")
+        else:
+            close_btn.label = "닫기"
+            close_btn.remove_class("-cancel")
+        # 스피너 + "동기화 중…" 표시 토글 (클리핑 뷰 로딩과 동일한 느낌)
+        try:
+            row = self.query_one("#sync-buttons")
+            row.set_class(running, "-running")
+            self.query_one("#sync-status", Static).update(
+                "[b]동기화 중…[/b]" if running else ""
+            )
+        except Exception:
+            pass
+
+    def action_try_close(self) -> None:
+        if self.running:
+            self.notify("실행 중입니다 — '중단' 버튼으로 멈춘 뒤 닫으세요.",
+                        severity="warning", timeout=4)
+            return
+        self.dismiss()
+
+    def _cancel(self) -> None:
+        log = self.query_one("#sync-log", RichLog)
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                log.write("[yellow]⊘ 중단 요청 — 프로세스 종료 중…[/yellow]")
+            except Exception as e:
+                log.write(f"[red]중단 실패: {e}[/red]")
+        # 종료는 _pump_output 가 감지해 running=False 로 되돌린다
+
+    def on_unmount(self) -> None:
+        # 모달이 어떤 경로로든 닫히면 orphan subprocess 방지
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def _start_run(self) -> None:
         import subprocess
         log = self.query_one("#sync-log", RichLog)
         log.clear()
 
-        dry    = self.query_one("#opt-dry",    Checkbox).value
-        file_o = self.query_one("#opt-file",   Checkbox).value
-        notion = self.query_one("#opt-notion", Checkbox).value
-        reset  = self.query_one("#opt-reset",  Checkbox).value
+        dry          = self.query_one("#opt-dry",          Checkbox).value
+        file_o       = self.query_one("#opt-file",         Checkbox).value
+        notion       = self.query_one("#opt-notion",       Checkbox).value
+        reset        = self.query_one("#opt-reset",        Checkbox).value
+        reset_notion = self.query_one("#opt-reset-notion", Checkbox).value
+        rewrite      = self.query_one("#opt-rewrite",      Checkbox).value
 
         if not (dry or file_o or notion):
             log.write("[red]실행할 동작이 없습니다. dry-run / 파일 / Notion 중 하나 선택[/red]")
             return
+
+        # 실행 모드 요약 (사용자가 옵션 잘못 선택한 케이스 즉시 인지)
+        active = []
+        if dry:          active.append("[yellow]dry-run[/]")
+        if file_o:       active.append("[green]파일저장[/]")
+        if notion:       active.append("[magenta]Notion업로드[/]")
+        if reset:        active.append("[cyan]로컬reset[/]")
+        if reset_notion: active.append("[cyan]Notion-reset[/]")
+        if rewrite:      active.append("[magenta]챕터백필[/]")
+        log.write(f"[b]모드:[/] {' · '.join(active)}")
+
+        if rewrite and not notion:
+            log.write("[yellow]챕터 백필은 Notion 업로드와 함께 써야 효과가 있습니다.[/yellow]")
 
         cmd = [
             sys.executable, "sync_kfx.py",
@@ -789,6 +1006,10 @@ class SyncOptions(ModalScreen):
             cmd += ["--notion-token", tok, "--notion-db", db]
         if reset:
             cmd.append("--reset")
+        if reset_notion:
+            cmd.append("--reset-notion")
+        if rewrite:
+            cmd.append("--rewrite-bodies")
 
         # scope: 필터·선택된 책이 부분집합이면 --book 추가
         stems = [b["stem"] for b in self.scope_books]
@@ -798,13 +1019,18 @@ class SyncOptions(ModalScreen):
 
         log.write(f"[b]$ {' '.join(self._mask(cmd))}[/b]")
         try:
+            # PYTHONUNBUFFERED=1 — sync_kfx 의 print() 가 라인 단위로 즉시
+            # PIPE 로 흘러나오게 한다. 안 주면 child stdio 가 fully-buffered 라
+            # 책 처리 끝나야 한꺼번에 쏟아져 진행 상황 안 보임.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, env=env,
             )
         except Exception as e:
             log.write(f"[red]subprocess 실행 실패: {e}[/red]")
             return
+        self.running = True
         self.run_worker(self._pump_output, thread=True, exclusive=True)
 
     def _all_book_stems(self) -> list[str]:
@@ -830,9 +1056,13 @@ class SyncOptions(ModalScreen):
 
     _ANSI = __import__("re").compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
+    _PROG_RE = __import__("re").compile(r"^\[\s*\d+\s*/\s*\d+\]")
+
     def _pump_output(self) -> None:
+        from rich.text import Text
         log = self.query_one("#sync-log", RichLog)
         assert self._proc is not None
+        prev_blank = True   # 선두 빈 줄 억제
         for line in self._proc.stdout:
             # tqdm이 새어 나오는 경우 대비: ANSI 제거 + CR 뒤 마지막 segment만
             text = self._ANSI.sub("", line)
@@ -840,14 +1070,35 @@ class SyncOptions(ModalScreen):
                 text = text.rsplit("\r", 1)[-1]
             text = text.rstrip()
             if not text:
+                # 빈 줄을 살려 책 사이를 구분하되, 연속 빈 줄은 하나로 합침
+                if not prev_blank:
+                    self.app.call_from_thread(lambda: log.write(Text("")))
+                    prev_blank = True
                 continue
-            self.app.call_from_thread(lambda t=text: log.write(t))
+            prev_blank = False
+            # 책 진행 줄·결과 줄을 색으로 강조 → 이전 엔트리와 또렷이 구분
+            s = text.lstrip()
+            style = None
+            if self._PROG_RE.match(text):
+                style = f"{CAT.sky} bold"
+            elif s.startswith(("→", "↻")):
+                style = CAT.green
+            elif s.startswith("✓"):
+                style = CAT.teal
+            elif s.startswith(("×", "✗", "오류", "[경고]", "[warn]", "Traceback")):
+                style = CAT.red
+            self.app.call_from_thread(
+                lambda t=text, st=style: log.write(Text(t, style=st) if st else Text(t))
+            )
         rc = self._proc.wait()
-        msg = (
-            f"[green]완료 (exit {rc})[/green]"
-            if rc == 0 else f"[red]실패 (exit {rc})[/red]"
-        )
+        if rc == 0:
+            msg = "[green b]✓ 완료[/green b]"
+        elif rc in (-15, -2, 143, 130):     # SIGTERM/SIGINT — 사용자 중단
+            msg = "[yellow b]⊘ 중단됨[/yellow b]"
+        else:
+            msg = f"[red b]✗ 실패 (exit {rc})[/red b]"
         self.app.call_from_thread(lambda m=msg: log.write(m))
+        self.app.call_from_thread(lambda: setattr(self, "running", False))
 
 
 # ---------------------------------------------------------------------------
@@ -855,81 +1106,81 @@ class SyncOptions(ModalScreen):
 # ---------------------------------------------------------------------------
 
 class KindleTUI(App):
-    # Catppuccin Mocha
+    # Catppuccin Frappé — 밝은 다크
     CSS = """
     /* === 전역 ================================================ */
-    Screen { background: #1e1e2e; color: #cdd6f4; }
+    Screen { background: #303446; color: #c6d0f5; }
 
     Footer {
-        background: #11111b;
-        color: #cdd6f4;
-        border-top: heavy #45475a;
+        background: #232634;
+        color: #c6d0f5;
+        border-top: heavy #51576d;
     }
     Footer > .footer--key {
-        background: #cba6f7;
-        color: #1e1e2e;
+        background: #ca9ee6;
+        color: #303446;
         text-style: bold;
     }
     Footer > .footer--description {
-        color: #a6adc8;
+        color: #a5adce;
     }
-    Toast { border: thick #cba6f7; background: #313244; color: #cdd6f4; }
-    Toast.-warning { border: thick #f9e2af; }
-    Toast.-error   { border: thick #f38ba8; }
+    Toast { border: thick #ca9ee6; background: #414559; color: #c6d0f5; }
+    Toast.-warning { border: thick #e5c890; }
+    Toast.-error   { border: thick #e78284; }
 
     /* === Logo Row ============================================ */
     AppLogo {
-        height: 1;
-        padding: 0 2;
-        background: #181825;
-        color: #cdd6f4;
+        height: 2;
+        padding: 1 3 0 3;
+        background: #303446;
+        color: #c6d0f5;
     }
 
     /* === Status Bar ========================================== */
     StatusBar {
-        height: 4;
-        padding: 1 2;
-        background: #181825;
-        border-bottom: heavy #cba6f7;
+        height: 5;
+        padding: 1 3;
+        background: #303446;
+        border-bottom: solid #626880;
     }
 
     /* === Filter Input ======================================== */
     Input.filter {
         height: 3;
-        margin: 0 1;
-        border: round #45475a;
-        background: #313244;
-        color: #cdd6f4;
+        margin: 1 3 0 3;
+        border: round #51576d;
+        background: #292c3c;
+        color: #c6d0f5;
     }
     Input.filter:focus {
-        border: round #cba6f7;
-        background: #313244;
+        border: round #ca9ee6;
+        background: #292c3c;
     }
 
     /* === Books Table ========================================= */
     #books {
         height: 1fr;
-        margin: 0 1;
-        border: round #45475a;
-        background: #181825;
-        scrollbar-color: #cba6f7 #11111b;
-        scrollbar-color-hover: #f5c2e7;
-        scrollbar-corner-color: #11111b;
+        margin: 1 3 1 3;
+        border: round #737994;
+        background: #303446;
+        scrollbar-color: #ca9ee6 #232634;
+        scrollbar-color-hover: #f4b8e4;
+        scrollbar-corner-color: #232634;
         scrollbar-size: 1 1;
     }
     #books > .datatable--header {
-        background: #313244;
-        color: #cba6f7;
+        background: #414559;
+        color: #ca9ee6;
         text-style: bold;
     }
     #books > .datatable--cursor {
-        background: #cba6f7 35%;
-        color: #cdd6f4;
+        background: #ca9ee6 40%;
+        color: #c6d0f5;
         text-style: bold;
     }
-    #books > .datatable--hover { background: #313244; }
-    #books > .datatable--odd-row { background: #1e1e2e; }
-    #books > .datatable--even-row { background: #181825; }
+    #books > .datatable--hover { background: #414559; }
+    #books > .datatable--odd-row { background: #303446; }
+    #books > .datatable--even-row { background: #292c3c; }
     """
 
     BINDINGS = [
@@ -1200,7 +1451,11 @@ class KindleTUI(App):
         else:
             scope = self.books
             label = "전체"
-        self.push_screen(SyncOptions(self.kindle_root, scope, label))
+        def _after_sync(_):
+            # SyncOptions 가 닫힐 때 상태 reload → status bar / Notion 카운트 갱신
+            self.title_cache = load_cache(DEFAULT_TITLE_CACHE)
+            self.reload_books()
+        self.push_screen(SyncOptions(self.kindle_root, scope, label), _after_sync)
 
 
 # ---------------------------------------------------------------------------

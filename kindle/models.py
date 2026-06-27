@@ -14,6 +14,7 @@ class Clipping:
     content: str = ""
     source_file: str = ""
     recovered: bool = False      # True if content was recovered from ebook file
+    chapter: Optional[str] = None  # TOC breadcrumb (e.g. "1장 › 1. 서론"), KFX only
 
 
 @dataclass

@@ -83,6 +83,21 @@ class Clipping:
 
 `kindle/notion_export.py` 의 `fingerprint()`, `load_state()`, `save_state()` 가 관리한다.
 
+`--rewrite-bodies` (sync_kfx) / `sync_to_notion(rewrite=True)` 는 dedup 을 무시하고
+각 책의 Notion 페이지 본문을 통째로 지운 뒤 다시 쓴다 (`_rewrite_page_body`).
+챕터 정보 등 포맷 변경을 기존 페이지에 백필할 때 사용. fingerprint·표지·속성은 보존.
+
+---
+
+## 표지 캐시
+
+- URL 캐시: `~/.kindle_cover_cache.json` — `(title|author) → url`, hit 만 디스크 저장
+- 이미지 파일 캐시(TUI): `~/.cache/kindle_covers/<sha1(url)>.jpg`
+- 소스 우선순위: 알라딘 → Yes24 → Google Books (`_get_cover_url`)
+- TUI 는 고해상도(알라딘 `cover500`) 우선 다운로드, 실패 시 `cover200` 폴백
+- 표지 렌더러: tmux 안=HalfcellImage, Ghostty/Kitty/WezTerm=TGPImage,
+  그 외 AutoImage. `KINDLE_TUI_IMAGE` 로 강제 가능 (`ClippingPreview._image_widget_cls`)
+
 ---
 
 ## 제목 캐시
@@ -125,8 +140,14 @@ Calibre KFX Input 플러그인 ZIP에서 `kfxlib/` 폴더를 임시 디렉터리
 parse_yjr()                  # char offset 기반 클리핑 위치 추출
   → fill_clipping_text()     # char offset으로 원문 슬라이싱
   → fill_clipping_pages()    # APNX 페이지 번호 매핑
+  → fill_clipping_chapters() # TOC breadcrumb 매핑 (KFX $389 nav → $212)
   → fill_clipping_kindle_locations()  # Kindle Location 번호 변환
 ```
+
+`fill_clipping_chapters()` 도 raw char offset 을 쓰므로 반드시
+`fill_clipping_kindle_locations()` **이전**에 호출한다 (페이지 매핑과 동일 제약).
+`extract_kfx_info()` 는 `(page_map, kl_offsets, book_text, toc)` 4-tuple 을 돌려준다.
+`toc` 는 `[(char_offset, breadcrumb), …]` — breadcrumb 은 중첩 챕터를 ` › ` 로 연결.
 
 ---
 
