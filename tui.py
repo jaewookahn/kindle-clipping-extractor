@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from textual         import on, events
 from textual.app    import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -181,18 +182,10 @@ class ClippingPreview(ModalScreen):
     }
 
     CSS = """
-    ClippingPreview { align: center middle; layers: shadow card; }
-    /* 드롭 섀도우 — 같은 크기 박스를 어두운 색으로 오른쪽-아래 오프셋 → 떠 보임 */
-    #preview-shadow {
-        layer: shadow;
-        width: 90%; height: 88%;
-        background: #11111b;
-        offset: 4 2;
-    }
+    ClippingPreview { align: center middle; }
     #preview-box {
-        layer: card;
-        width: 90%; height: 88%;
-        border: round #babbf1;
+        width: 92%; height: 90%;
+        border: double #babbf1;
         background: #303446;
         padding: 1 2;
     }
@@ -238,9 +231,9 @@ class ClippingPreview(ModalScreen):
     }
     /* 표지 자리(플레이스홀더 Static·실제 Image 공통) — id 가 아니라 class 로
        크기를 줘서, 위젯 교체 시 id 충돌(DuplicateIds) 없이 같은 레이아웃 유지.
-       높이만 고정하고 너비는 auto → textual-image 가 이미지 실제 비율로 너비를
-       계산(양쪽 고정 시 TGP 가 박스에 맞춰 늘려 세로로 길어지던 문제 해결). */
-    #cover-panel > .cover { width: auto; height: 30; }
+       너비만 패널에 맞추고 높이는 auto → 이미지 원래 비율 그대로 (검증된 설정,
+       양쪽 고정하면 TGP 가 박스에 늘려 비율이 깨짐). */
+    #cover-panel > .cover { width: 100%; height: auto; }
     #cover-caption {
         dock: bottom;
         height: 1;
@@ -290,7 +283,6 @@ class ClippingPreview(ModalScreen):
         self._content_w: int = 80       # 내용 컬럼 동적 너비 (_layout_columns 가 갱신)
 
     def compose(self) -> ComposeResult:
-        yield Static(id="preview-shadow")     # 드롭 섀도우(뒤 레이어)
         with Vertical(id="preview-box"):
             with Horizontal(id="preview-header"):
                 yield Label(
@@ -312,21 +304,22 @@ class ClippingPreview(ModalScreen):
     _FIXED_COLS = [("#", 4), ("", 3), ("색", 6), ("페이지", 5),
                    ("위치", 10), ("날짜", 16), ("챕터", 14)]
 
-    _COVER_PANEL_W = 34   # #cover-panel width 와 일치시킬 것
+    def _layout_columns(self, table_w: int = 0) -> None:
+        """컬럼 재구성 — 내용 컬럼이 테이블의 남는 가로폭을 모두 채워 워드랩 on
+        일 때 가로 스크롤이 안 생기게 한다. (clear 후 재추가)
 
-    def _layout_columns(self) -> None:
-        """테이블 폭에 맞춰 컬럼 재구성 — 내용 컬럼이 남는 가로폭을 모두 차지해
-        워드랩 on 일 때 가로 스크롤이 안 생기게 한다. (clear 후 재추가)
-
-        table.size 는 계산 시점(워커 콜백)에 아직 0인 경우가 많아 신뢰할 수 없어
-        앱 전체 폭에서 레이아웃 상수로 역산한다(preview-box 95% + 커버패널 등)."""
+        table_w 는 테이블 위젯의 실제 content 폭(이미 테두리·세로 스크롤바 제외).
+        DataTable 은 컬럼당 좌우 cell_padding(기본 1, =2셀)을 더하므로 그만큼 뺀다.
+        """
         table = self.query_one("#preview-table", DataTable)
         other = sum(w for _, w in self._FIXED_COLS)
         n_cols = len(self._FIXED_COLS) + 1
-        app_w = self.app.size.width or 120
-        box_inner = int(app_w * 0.95) - 4          # preview-box padding 1 2
-        table_inner = box_inner - self._COVER_PANEL_W - 1 - 2 - 1  # 커버+여백+테두리+스크롤바
-        content_w = max(22, table_inner - other - n_cols * 2 - 3)  # 컬럼당 패딩 2 + 여유
+        pad = getattr(table, "cell_padding", 1) * 2 * n_cols
+        if table_w <= 0:
+            table_w = table.size.width
+        content_w = max(20, table_w - other - pad - 3) if table_w > 0 else 80
+        if content_w == self._content_w and table.columns:
+            return                      # 변화 없음 → 재구성 생략(깜빡임/루프 방지)
         self._content_w = content_w
         table.clear(columns=True)
         for label, w in self._FIXED_COLS:
@@ -342,14 +335,31 @@ class ClippingPreview(ModalScreen):
         self.query_one("#wrap-toggle", Button).can_focus = False
         self.set_focus(table)
         self.call_after_refresh(table.focus)   # 자동 포커스 이후에도 보장
+        self.call_after_refresh(self._fit_now) # 실측 폭으로 내용 컬럼 맞춤
         self.run_worker(self._load_clippings, thread=True, exclusive=True)
         self.run_worker(self._load_cover,     thread=True, exclusive=False)
 
-    def on_resize(self, event=None) -> None:
-        # 폭이 정해지거나 바뀌면 내용 컬럼 너비 재계산 후 다시 그림
-        self._layout_columns()
-        if self.clips or self.errors:
+    def on_resize(self, event: events.Resize) -> None:
+        # 화면 크기 변동 → 리프레시 후 테이블 실측 폭으로 컬럼 재조정
+        self.call_after_refresh(self._fit_now)
+
+    def _fit_now(self) -> None:
+        """테이블의 실제 content 폭을 읽어 내용 컬럼을 맞춘다(가로 스크롤 제거).
+
+        세로 스크롤바가 생기면 테이블 폭이 줄어드는데, 행을 그린 뒤 다시
+        호출되면서 줄어든 폭으로 재조정 → 수렴(폭 변화 없으면 멈춤)."""
+        try:
+            table = self.query_one("#preview-table", DataTable)
+        except Exception:
+            return
+        w = table.size.width
+        if w <= 0:
+            return
+        prev = self._content_w
+        self._layout_columns(w)
+        if self._content_w != prev and (self.clips or self.errors):
             self._redraw_table()
+            self.call_after_refresh(self._fit_now)   # 스크롤바 출현 후 재측정
 
     def _load_clippings(self) -> None:
         """파이프라인(parse_yjr → fill_text → fill_pages → fill_kl)을 thread에서 실행."""
@@ -634,6 +644,8 @@ class ClippingPreview(ModalScreen):
         # 로드 완료 시점(화면 완전 마운트 후)에 테이블로 포커스 — compose 때
         # 헤더 버튼에 잡힌 stale 포커스를 이때 확실히 옮긴다. 한 번만.
         self.query_one("#preview-table", DataTable).focus()
+        # 행이 채워져 세로 스크롤바가 생긴 뒤 줄어든 폭으로 내용 컬럼 재조정
+        self.call_after_refresh(self._fit_now)
 
     def _filtered_clips(self) -> list:
         """검색어로 클리핑 필터 — 내용·챕터·타입·페이지 대상 (대소문자 무시)."""
@@ -653,7 +665,7 @@ class ClippingPreview(ModalScreen):
     def _redraw_table(self) -> None:
         table = self.query_one("#preview-table", DataTable)
         table.loading = False
-        self._layout_columns()   # 현재 폭 기준 내용 컬럼 너비 재계산(가로 스크롤 방지)
+        # 컬럼 너비는 _on_table_resize 가 실측 폭으로 관리 → 여기선 행만 다시 그림
         table.clear()
         if not self.clips:
             if self.errors:
@@ -790,17 +802,10 @@ class KindlePicker(ModalScreen):
     ]
 
     CSS = """
-    KindlePicker { align: center middle; layers: shadow card; }
-    #picker-shadow {
-        layer: shadow;
-        width: 90%; height: 60%;
-        background: #11111b;
-        offset: 4 2;
-    }
+    KindlePicker { align: center middle; }
     #picker-box {
-        layer: card;
         width: 90%; height: 60%;
-        border: round #babbf1;
+        border: double #babbf1;
         background: #303446;
         padding: 1 2;
     }
@@ -834,7 +839,6 @@ class KindlePicker(ModalScreen):
         self.candidates = candidates
 
     def compose(self) -> ComposeResult:
-        yield Static(id="picker-shadow")
         with Vertical(id="picker-box"):
             yield Label(
                 f"[b]Kindle 후보 {len(self.candidates)}개[/b] — Enter로 선택, Esc로 취소",
@@ -881,19 +885,11 @@ class SyncOptions(ModalScreen):
     running = reactive(False)
 
     CSS = """
-    SyncOptions { align: center middle; layers: shadow card; }
-    #sync-shadow {
-        layer: shadow;
-        width: 88%; height: 88%;
-        max-width: 120;
-        background: #11111b;
-        offset: 4 2;
-    }
+    SyncOptions { align: center middle; }
     #sync-box {
-        layer: card;
         width: 88%; height: 88%;
         max-width: 120;
-        border: round #babbf1;
+        border: double #babbf1;
         background: #303446;
         padding: 1 3;
     }
@@ -1028,7 +1024,6 @@ class SyncOptions(ModalScreen):
 
     def compose(self) -> ComposeResult:
         has_env = bool(os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_DB"))
-        yield Static(id="sync-shadow")
         with Vertical(id="sync-box"):
             yield Label("동기화", id="sync-heading")
             with Vertical(id="sync-form"):
