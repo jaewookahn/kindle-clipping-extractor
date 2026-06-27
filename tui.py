@@ -243,10 +243,10 @@ class ClippingPreview(ModalScreen):
         margin-left: 1;
         border: round #51576d;
         background: #292c3c;
-        scrollbar-background: #51576d;
-        scrollbar-color: #ca9ee6;
-        scrollbar-background-hover: #626880;
-        scrollbar-background-active: #626880;
+        scrollbar-background: #414559;
+        scrollbar-color: #737994;
+        scrollbar-color-hover: #ca9ee6;
+        scrollbar-background-hover: #51576d;
     }
     #preview-table > .datatable--header {
         background: #414559;
@@ -301,7 +301,7 @@ class ClippingPreview(ModalScreen):
         table = self.query_one("#preview-table", DataTable)
         table.add_column("#",     width=4)
         table.add_column("",      width=4)    # 타입 아이콘
-        table.add_column("색",    width=11)
+        table.add_column("색",    width=6)
         table.add_column("페이지", width=6)
         table.add_column("위치",  width=12)
         table.add_column("날짜",  width=16)
@@ -534,13 +534,24 @@ class ClippingPreview(ModalScreen):
         "green":  CAT.green,
         "purple": CAT.mauve,
     }
+    # 한글 2자 라벨 — 폭 절약 (영문 yellow/orange 등은 길어서 컬럼 넓어짐)
+    _COLOR_KO = {
+        "yellow": "노랑",
+        "blue":   "파랑",
+        "pink":   "분홍",
+        "orange": "주황",
+        "red":    "빨강",
+        "green":  "초록",
+        "purple": "보라",
+    }
 
     @classmethod
     def _color_cell(cls, name: str) -> str:
         if not name:
             return f"[{CAT.overlay0}]-[/]"
         bg = cls._COLOR_BG.get(name, CAT.surface1)
-        return f"[{CAT.base} on {bg} b] {name:^7} [/]"
+        ko = cls._COLOR_KO.get(name, name[:2])   # 미등록 색은 영문 앞 2자
+        return f"[{CAT.base} on {bg} b] {ko} [/]"
 
     @classmethod
     def _split_color(cls, content: str) -> tuple[str, str]:
@@ -886,10 +897,10 @@ class SyncOptions(ModalScreen):
         padding: 0 1;
         background: #232634;
         color: #c6d0f5;
-        scrollbar-background: #51576d;
-        scrollbar-color: #ca9ee6;
-        scrollbar-background-hover: #626880;
-        scrollbar-background-active: #626880;
+        scrollbar-background: #414559;
+        scrollbar-color: #737994;
+        scrollbar-color-hover: #ca9ee6;
+        scrollbar-background-hover: #51576d;
     }
     #sync-buttons {
         dock: bottom;
@@ -1266,10 +1277,10 @@ class KindleTUI(App):
         margin: 1 3 1 3;
         border: round #737994;
         background: #303446;
-        scrollbar-background: #51576d;
-        scrollbar-color: #ca9ee6;
-        scrollbar-background-hover: #626880;
-        scrollbar-background-active: #626880;
+        scrollbar-background: #414559;
+        scrollbar-color: #737994;
+        scrollbar-color-hover: #ca9ee6;
+        scrollbar-background-hover: #51576d;
         scrollbar-color-hover: #f4b8e4;
         scrollbar-corner-color: #232634;
         scrollbar-size: 1 2;
