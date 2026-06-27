@@ -338,12 +338,16 @@ def process_book(
     seen_keys: Set[str],
     pbar: "tqdm",
     title_cache: Optional[dict] = None,
-) -> tuple[list[Clipping], str, str, int]:
+) -> tuple[list[Clipping], list[str], str, str, int]:
     """
     YJR 파싱 → 신규 필터 → KFX 메타데이터·텍스트·페이지·KL 번호 채우기.
 
+    Fingerprint 는 fill_clipping_kindle_locations 호출 전(raw char offset 상태)에
+    한 번만 계산해 둔다. 이렇게 해야 seen_keys 비교와 저장이 같은 값을 쓰게 되어
+    재실행 시 동일 클리핑이 다시 "신규" 로 잡히지 않는다.
+
     Returns:
-        (new_clippings, real_title, author, skipped_count)
+        (new_clippings, new_fingerprints, real_title, author, skipped_count)
     """
     global _current_book
 
@@ -373,14 +377,17 @@ def process_book(
         all_clips.extend(clips)
 
     if not all_clips:
-        return [], real_title, author, 0
+        return [], [], real_title, author, 0
 
-    # fingerprint는 실제 제목 기준이 아닌 위치 기준이므로 file_stem도 포함
-    new_clips = [c for c in all_clips if _fingerprint(c) not in seen_keys]
+    # fingerprint 는 fill 전 raw char offset 기준으로 한 번에 계산
+    fingerprints = [_fingerprint(c) for c in all_clips]
+    pairs = [(fp, c) for fp, c in zip(fingerprints, all_clips) if fp not in seen_keys]
+    new_clips = [c for _, c in pairs]
+    new_fps   = [fp for fp, _ in pairs]
     skipped   = len(all_clips) - len(new_clips)
 
     if not new_clips:
-        return [], real_title, author, skipped
+        return [], [], real_title, author, skipped
 
     # 3. KFX 텍스트·페이지·KL 번호 추출
     pbar.set_postfix_str(f"{real_title[:40]}  KFX 추출", refresh=True)
@@ -400,7 +407,7 @@ def process_book(
     else:
         logger.warning("[%s] Kindle Location 맵 없음 — location 번호가 raw offset으로 남음", real_title)
 
-    return new_clips, real_title, author, skipped
+    return new_clips, new_fps, real_title, author, skipped
 
 
 
@@ -500,6 +507,7 @@ def run_pipeline(args) -> int:
 
     # ── 4. 책별 처리 (progress bar) ──────────────────────────────────────
     all_new: list[Clipping] = []
+    all_new_fps: list[str]  = []
     book_stats: list[dict]  = []
 
     title_cache_path = Path(args.title_cache)
@@ -518,11 +526,12 @@ def run_pipeline(args) -> int:
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
     ) as pbar:
         for i, (kfx, sdr, stem) in enumerate(pbar, 1):
-            new_clips, real_title, author, skipped = process_book(
+            new_clips, new_fps, real_title, author, skipped = process_book(
                 kfx, sdr, stem, seen_keys, pbar, title_cache=title_cache,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
+            all_new_fps.extend(new_fps)
             book_stats.append({
                 "title": real_title, "author": author,
                 "new": len(new_clips), "skipped": skipped,
@@ -597,8 +606,9 @@ def run_pipeline(args) -> int:
         )
 
     # ── 6. 상태 업데이트 ─────────────────────────────────────────────────
-    for c in all_new:
-        seen_keys.add(_fingerprint(c))
+    # fingerprint 는 fill 이전 raw offset 기준으로 process_book 에서 미리 계산해 둠
+    for fp in all_new_fps:
+        seen_keys.add(fp)
 
     state["last_sync"]    = datetime.now().isoformat()
     state["total_synced"] = state.get("total_synced", 0) + len(all_new)

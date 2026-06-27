@@ -171,9 +171,25 @@ class ClippingPreview(ModalScreen):
     """선택한 책의 클리핑 목록 (YJR + KFX 텍스트 채워서)."""
 
     BINDINGS = [
-        Binding("escape", "dismiss",  "닫기"),
-        Binding("q",      "dismiss",  "닫기", show=False),
+        Binding("escape", "dismiss",        "닫기"),
+        Binding("q",      "dismiss",        "닫기", show=False),
+        Binding("w",      "toggle_wrap",    "워드랩"),
+        Binding("1",      "sort_clip('idx')",    "#",     show=False),
+        Binding("2",      "sort_clip('type')",   "타입",  show=False),
+        Binding("3",      "sort_clip('color')",  "색",    show=False),
+        Binding("4",      "sort_clip('page')",   "페이지",show=False),
+        Binding("5",      "sort_clip('loc')",    "위치",  show=False),
+        Binding("6",      "sort_clip('date')",   "날짜",  show=False),
     ]
+
+    SORT_KEYS = {
+        "idx":   lambda c: 0,                                       # 원래 순서 유지
+        "type":  lambda c: c.clip_type,
+        "color": lambda c: (c.content or "").startswith("[") and (c.content or "")[:10] or "",
+        "page":  lambda c: c.page if c.page else 0,
+        "loc":   lambda c: c.location_start if c.location_start is not None else 0,
+        "date":  lambda c: c.added_date or "",
+    }
 
     CSS = """
     ClippingPreview { align: center middle; }
@@ -183,15 +199,35 @@ class ClippingPreview(ModalScreen):
         background: #1e1e2e;
         padding: 1 2;
     }
-    #preview-title {
+    #preview-header {
         dock: top;
-        height: 2;
-        content-align: center middle;
+        height: 3;
         background: #313244;
+    }
+    #preview-title {
+        width: 1fr;
+        height: 3;
+        content-align: center middle;
         color: #f5c2e7;
         text-style: bold;
-        padding: 0 1;
     }
+    #toolbar {
+        width: 18;
+        height: 3;
+        padding: 0 1;
+        align: right middle;
+    }
+    Button#wrap-toggle {
+        width: 14;
+        height: 1;
+        border: none;
+        background: #45475a;
+        color: #cdd6f4;
+        margin-top: 1;
+    }
+    Button#wrap-toggle:hover { background: #585b70; }
+    Button#wrap-toggle.-wrap-on  { background: #a6e3a1; color: #1e1e2e; text-style: bold; }
+    Button#wrap-toggle.-wrap-off { background: #45475a; color: #cdd6f4; }
     #preview-body {
         height: 1fr;
         margin-top: 1;
@@ -232,14 +268,22 @@ class ClippingPreview(ModalScreen):
     def __init__(self, book: dict) -> None:
         super().__init__()
         self.book = book
+        self.clips: list = []          # 로드된 클리핑 캐시
+        self.errors: list[str] = []
+        self.wrap_on: bool = True
+        self.sort_key: str = "date"
+        self.sort_reverse: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-box"):
-            yield Label(
-                f"[b]{self.book['title']}[/b]   {self.book['author']}    "
-                f"({self.book['yjr_count']} YJR / {self.book['stem']})",
-                id="preview-title",
-            )
+            with Horizontal(id="preview-header"):
+                yield Label(
+                    f"[b]{self.book['title']}[/b]   {self.book['author']}    "
+                    f"({self.book['yjr_count']} YJR / {self.book['stem']})",
+                    id="preview-title",
+                )
+                with Horizontal(id="toolbar"):
+                    yield Button("⏎ wrap: ON", id="wrap-toggle", classes="-wrap-on")
             with Horizontal(id="preview-body"):
                 with Vertical(id="cover-panel"):
                     yield Static("[dim]표지 로드 중…[/dim]", id="cover-image")
@@ -248,13 +292,13 @@ class ClippingPreview(ModalScreen):
 
     def on_mount(self) -> None:
         table = self.query_one("#preview-table", DataTable)
-        table.add_column("#",      width=4)
-        table.add_column("타입",   width=14)
-        table.add_column("색",     width=10)
+        table.add_column("#",     width=4)
+        table.add_column("",      width=4)    # 타입 아이콘
+        table.add_column("색",    width=11)
         table.add_column("페이지", width=6)
-        table.add_column("위치",   width=12)
-        table.add_column("날짜",   width=16)
-        table.add_column("내용",   width=80)
+        table.add_column("위치",  width=12)
+        table.add_column("날짜",  width=16)
+        table.add_column("내용",  width=80)
         table.loading = True
         self.run_worker(self._load_clippings, thread=True, exclusive=True)
         self.run_worker(self._load_cover,     thread=True, exclusive=False)
@@ -355,18 +399,29 @@ class ClippingPreview(ModalScreen):
     # YJR이 content 앞에 "[yellow] ..." 같은 prefix를 붙임. 분리해서 색 컬럼으로.
     _COLOR_RE = __import__("re").compile(r"^\[([a-zA-Z]+)\]\s*(.*)", flags=__import__("re").DOTALL)
 
-    _TYPE_LABEL = {
-        "highlight":     "🖍️ 하이라이트",
-        "bookmark":      "🔖 북마크",
-        "note":          "📝 노트",
-        "last_position": "📍 위치",
+    _TYPE_ICON = {
+        "highlight":     "🖍️",
+        "bookmark":      "🔖",
+        "note":          "📝",
+        "last_position": "📍",
     }
-    _COLOR_CHIP = {
-        "yellow": f"[{CAT.base} on {CAT.yellow} b] yellow [/]",
-        "blue":   f"[{CAT.base} on {CAT.blue}   b]  blue  [/]",
-        "pink":   f"[{CAT.base} on {CAT.pink}   b]  pink  [/]",
-        "orange": f"[{CAT.base} on {CAT.peach}  b] orange [/]",
+    # 색 이름은 글자로 보여주되 배경색을 칠해서 식별
+    _COLOR_BG = {
+        "yellow": CAT.yellow,
+        "blue":   CAT.blue,
+        "pink":   CAT.pink,
+        "orange": CAT.peach,
+        "red":    CAT.red,
+        "green":  CAT.green,
+        "purple": CAT.mauve,
     }
+
+    @classmethod
+    def _color_cell(cls, name: str) -> str:
+        if not name:
+            return f"[{CAT.overlay0}]-[/]"
+        bg = cls._COLOR_BG.get(name, CAT.surface1)
+        return f"[{CAT.base} on {bg} b] {name:^7} [/]"
 
     @classmethod
     def _split_color(cls, content: str) -> tuple[str, str]:
@@ -399,22 +454,27 @@ class ClippingPreview(ModalScreen):
         return t, height
 
     def _show_clips(self, clips: list, errors: list = None) -> None:
+        # 워커 → 메인 호출 진입점. 데이터 보관 후 redraw.
+        self.clips  = clips
+        self.errors = errors or []
+        self._redraw_table()
+
+    def _redraw_table(self) -> None:
         table = self.query_one("#preview-table", DataTable)
         table.loading = False
-        errors = errors or []
-        if not clips:
-            if errors:
-                for e in errors:
+        table.clear()
+        if not self.clips:
+            if self.errors:
+                for e in self.errors:
                     cell, h = self._content_cell(f"[red]{e}[/red]", markup=True)
                     table.add_row("!", "-", "-", "-", "-", "-", cell, height=h)
             else:
                 table.add_row("-", "-", "-", "-", "-", "-", "(클리핑 없음)")
             return
-        # 클리핑 있으면 에러는 경고 노티로
-        if errors:
-            self.notify(" / ".join(errors), severity="warning", timeout=6)
-        # added_date 기준 정렬 (없으면 가장 끝으로)
-        clips_sorted = sorted(clips, key=lambda c: c.added_date or "9999")
+        if self.errors:
+            self.notify(" / ".join(self.errors), severity="warning", timeout=6)
+        key_fn = self.SORT_KEYS.get(self.sort_key, self.SORT_KEYS["date"])
+        clips_sorted = sorted(self.clips, key=key_fn, reverse=self.sort_reverse)
         for i, c in enumerate(clips_sorted, 1):
             loc = f"L{c.location_start}" if c.location_start is not None else "-"
             if c.location_end and c.location_end != c.location_start:
@@ -423,7 +483,7 @@ class ClippingPreview(ModalScreen):
             date = (c.added_date or "-")[:16]   # "YYYY-MM-DD HH:MM"
 
             color, raw = self._split_color(c.content or "")
-            color_cell = self._COLOR_CHIP.get(color, color or "-")
+            color_cell = self._color_cell(color)
 
             # 북마크는 위치 1글자 텍스트가 의미 없음 → 비움
             if c.clip_type == "bookmark":
@@ -431,8 +491,15 @@ class ClippingPreview(ModalScreen):
             else:
                 shown = (raw or "").strip() or "·"
 
-            content_cell, height = self._content_cell(shown)
-            type_cell = self._TYPE_LABEL.get(c.clip_type, c.clip_type)
+            if self.wrap_on:
+                content_cell, height = self._content_cell(shown)
+            else:
+                # 워드랩 off: 한 줄로 표시
+                from rich.text import Text
+                content_cell = Text(shown.replace("\n", " "), no_wrap=True, overflow="ellipsis")
+                height = 1
+
+            type_cell = self._TYPE_ICON.get(c.clip_type, c.clip_type)
             table.add_row(
                 str(i),
                 type_cell,
@@ -443,6 +510,41 @@ class ClippingPreview(ModalScreen):
                 content_cell,
                 height=height,
             )
+
+    # -- actions ----------------------------------------------------------
+
+    def action_toggle_wrap(self) -> None:
+        self.wrap_on = not self.wrap_on
+        self._redraw_table()
+        btn = self.query_one("#wrap-toggle", Button)
+        if self.wrap_on:
+            btn.label = "⏎ wrap: ON"
+            btn.set_classes("-wrap-on")
+        else:
+            btn.label = "→ wrap: OFF"
+            btn.set_classes("-wrap-off")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "wrap-toggle":
+            event.stop()
+            self.action_toggle_wrap()
+
+    def action_sort_clip(self, key: str) -> None:
+        if self.sort_key == key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = key
+            self.sort_reverse = False
+        self._redraw_table()
+
+    def on_data_table_header_selected(self, event) -> None:
+        if event.data_table.id != "preview-table":
+            return
+        idx_to_key = {0: "idx", 1: "type", 2: "color",
+                      3: "page", 4: "loc", 5: "date"}
+        key = idx_to_key.get(event.column_index)
+        if key:
+            self.action_sort_clip(key)
 
 
 # ---------------------------------------------------------------------------
@@ -547,13 +649,14 @@ class SyncOptions(ModalScreen):
     }
     #sync-form {
         dock: top;
-        height: 17;
+        height: auto;
+        max-height: 20;
         padding: 1 1;
         background: #181825;
         border-bottom: heavy #cba6f7;
     }
     #file-row { height: 3; }
-    #file-row Label { width: 8; padding-top: 1; color: #cdd6f4; text-style: none; }
+    #file-row > Label { width: 8; padding-top: 1; color: #cdd6f4; text-style: none; }
     #file-row Input {
         width: 1fr;
         background: #313244;
@@ -561,7 +664,8 @@ class SyncOptions(ModalScreen):
         border: round #45475a;
     }
     #file-row Input:focus { border: round #cba6f7; }
-    #sync-form Label {
+    /* sync-form 직속 Label 만 강조 (Checkbox 내부 Label 안 건드림) */
+    #sync-form > Label {
         color: #89dceb;
         text-style: bold;
         margin-bottom: 1;
@@ -593,15 +697,7 @@ class SyncOptions(ModalScreen):
         border: tall #94e2d5;
     }
     #sync-buttons Button#run:hover { background: #94e2d5; }
-    Checkbox {
-        width: 1fr;
-        background: transparent;
-        color: #cdd6f4;
-    }
-    Checkbox > .toggle--button {
-        color: #cba6f7;
-        background: #45475a;
-    }
+
     """
 
     def __init__(

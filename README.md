@@ -45,6 +45,7 @@ Kindle 기기의 하이라이트·메모·북마크를 여러 형식에서 파�
 | `parse_clippings.py` | 단독 실행 | 단일 파일/디렉터리 파싱 후 파일 출력 |
 | `sync_clippings.py` | 단독 실행 | My Clippings.txt 증분 동기화 (파일 출력 전용) |
 | `recover_clippings.py` | 단독 실행 | My Clippings.txt 한도 초과 텍스트 복구 |
+| `notion_create_db.py` | 1회 실행 | sync_kfx 가 기대하는 스키마로 Notion 데이터베이스 자동 생성 |
 
 ---
 
@@ -101,6 +102,90 @@ KFX 메타데이터 추출은 kfxlib 호출이 권당 수백 ms 들기 때문에
 파일이 갱신되거나 교체되면 mtime/size 가 바뀌어 자동 무효화.
 
 `sync_kfx.py --titles` 와 TUI 양쪽에서 공유 → 한 번 추출하면 이후엔 즉시.
+
+---
+
+## Notion 초기 설정
+
+### 1. Integration 만들고 `NOTION_TOKEN` 얻기
+
+1. https://www.notion.so/profile/integrations 접속
+2. **New integration** 클릭 → 이름(예: `kindle-clipping`), 워크스페이스 선택 → Save
+3. **Internal Integration Secret** 복사 — `secret_…` 또는 `ntn_…` 로 시작
+4. 이 값이 `NOTION_TOKEN`
+
+### 2. 데이터베이스 만들고 `NOTION_DB` 얻기
+
+#### 방법 A — 스크립트로 자동 생성 (권장)
+
+부모 페이지(아무 빈 페이지)만 만들고 거기에 integration 권한을 주면 끝:
+
+1. Notion 에 빈 페이지 하나 만듦 (예: "Kindle")
+2. 그 페이지 우상단 `…` → `+ Add connections` → 위에서 만든 integration 추가
+3. 부모 페이지 URL 의 32자 hex 부분 복사
+4. 실행:
+   ```bash
+   export NOTION_TOKEN=ntn_xxx
+   python notion_create_db.py --parent <부모페이지ID-또는-URL통째로>
+   # → export NOTION_DB=<생성된DB_ID> 한 줄 출력
+   ```
+5. 출력된 `export NOTION_DB=…` 줄을 그대로 실행하면 끝
+
+또는 한 줄로:
+```bash
+export NOTION_DB=$(python notion_create_db.py --parent <부모페이지ID> --quiet)
+```
+
+스키마(아래 표)는 자동으로 들어가니 사용자가 컬럼 만들 필요 없음.
+
+#### 방법 B — 수동 생성
+
+빈 페이지에서 `+ New database` (Full page 추천). 아래 속성을 정확히 같은 이름으로 추가:
+
+| 속성 이름 | 타입 |
+|---|---|
+| Title | 제목 (기본 생성됨) |
+| Author | 텍스트 |
+| Highlights | 숫자 |
+| Last Highlighted | 날짜 |
+| Last Synced | 날짜 |
+
+만든 후 **데이터베이스 페이지 우상단 `…` → `+ Add connections` → 위에서 만든 integration 추가**. 이 단계 빼먹으면 API 가 권한 거부.
+
+DB ID 는 URL 에서:
+
+```
+https://www.notion.so/<workspace>/<dbname>-1a2b3c4d5e6f7890abcdef1234567890?v=...
+                                            └─────────── DB_ID ────────────┘
+```
+
+`?v=...` 뒷부분은 view ID 라 잘라낼 것. 하이픈은 있어도/없어도 됨.
+
+### 3. 환경변수 등록
+
+```bash
+# 한 번만
+export NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxx
+export NOTION_DB=1a2b3c4d5e6f7890abcdef1234567890
+
+# 영구 — ~/.zshrc 또는 ~/.bashrc 에 추가
+echo 'export NOTION_TOKEN=ntn_xxx' >> ~/.zshrc
+echo 'export NOTION_DB=1a2b3c4d...' >> ~/.zshrc
+```
+
+두 변수가 잡히면 TUI 의 동기화 모달이 "Notion 업로드" 를 자동 ON 으로 시작.
+
+### 자주 막히는 곳
+
+- **데이터베이스에 integration Connect 안 함** → `Object not found` / 권한 오류. 각 DB 마다 integration 권한 부여 필요
+- **일반 페이지 vs 데이터베이스 페이지 혼동** — `+ New page` 가 아닌 `+ New database` 사용 (full-page DB 가 가장 안전)
+- **URL 의 `?v=...` 같이 복사** → view ID 가 섞임. 32자 hex 부분만 떼어내야 함
+
+설정 확인:
+
+```bash
+python sync_kfx.py --book <짧은stem> --notion-db $NOTION_DB --dry-run
+```
 
 ---
 
