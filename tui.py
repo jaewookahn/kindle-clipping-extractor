@@ -243,7 +243,10 @@ class ClippingPreview(ModalScreen):
         margin-left: 1;
         border: round #51576d;
         background: #292c3c;
-        scrollbar-color: #ca9ee6 #232634;
+        scrollbar-background: #51576d;
+        scrollbar-color: #ca9ee6;
+        scrollbar-background-hover: #626880;
+        scrollbar-background-active: #626880;
     }
     #preview-table > .datatable--header {
         background: #414559;
@@ -883,7 +886,10 @@ class SyncOptions(ModalScreen):
         padding: 0 1;
         background: #232634;
         color: #c6d0f5;
-        scrollbar-color: #ca9ee6 #232634;
+        scrollbar-background: #51576d;
+        scrollbar-color: #ca9ee6;
+        scrollbar-background-hover: #626880;
+        scrollbar-background-active: #626880;
     }
     #sync-buttons {
         dock: bottom;
@@ -1260,10 +1266,13 @@ class KindleTUI(App):
         margin: 1 3 1 3;
         border: round #737994;
         background: #303446;
-        scrollbar-color: #ca9ee6 #232634;
+        scrollbar-background: #51576d;
+        scrollbar-color: #ca9ee6;
+        scrollbar-background-hover: #626880;
+        scrollbar-background-active: #626880;
         scrollbar-color-hover: #f4b8e4;
         scrollbar-corner-color: #232634;
-        scrollbar-size: 1 1;
+        scrollbar-size: 1 2;
     }
     #books > .datatable--header {
         background: #414559;
