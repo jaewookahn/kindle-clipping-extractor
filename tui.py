@@ -222,7 +222,7 @@ class ClippingPreview(ModalScreen):
         margin-top: 1;
     }
     #cover-panel {
-        width: 32;
+        width: 40;
         border: round #51576d;
         background: #292c3c;
         padding: 1;
@@ -230,8 +230,9 @@ class ClippingPreview(ModalScreen):
     }
     /* 표지 자리(플레이스홀더 Static·실제 Image 공통) — id 가 아니라 class 로
        크기를 줘서, 위젯 교체 시 id 충돌(DuplicateIds) 없이 같은 레이아웃 유지.
-       height 를 1fr 로 두면 책 표지(2:3)가 세로로 늘어나므로 고정 높이 사용. */
-    #cover-panel > .cover { width: 100%; height: 22; }
+       height 를 1fr 로 두면 책 표지(2:3)가 세로로 늘어나므로 고정 높이 사용.
+       tmux half-block 렌더는 셀 수 = 해상도라, 패널을 키워 선명도를 올린다. */
+    #cover-panel > .cover { width: 100%; height: 28; }
     #cover-caption {
         dock: bottom;
         height: 1;
