@@ -51,7 +51,7 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from tqdm import tqdm
 
@@ -74,6 +74,12 @@ from kindle.exporters import (
 from kindle.notion_export import (
     sync_to_notion,
     DEFAULT_STATE as NOTION_DEFAULT_STATE,
+)
+from kindle.title_cache import (
+    load_cache as load_title_cache,
+    save_cache as save_title_cache,
+    get_or_extract as get_or_extract_title,
+    DEFAULT_PATH as DEFAULT_TITLE_CACHE,
 )
 
 
@@ -229,24 +235,47 @@ def _fingerprint(c: Clipping) -> str:
 _KFX_EXTS = (".kfx", ".azw3", ".azw", ".mobi")
 
 
-def find_kfx_sdr_pairs(documents: Path) -> list[tuple[Path, Path, str]]:
+def _book_status(b: dict) -> str:
+    if b["yjr_count"] > 0:
+        return f"{b['yjr_count']} YJR"
+    if b["sdr"] is not None:
+        return "SDR만"
+    return "없음"
+
+
+def _vis_pad(s: str, width: int) -> str:
+    """CJK 문자(전각)는 2칸으로 계산해 시각적 정렬을 맞춤. 초과 시 truncate."""
+    import unicodedata
+    def w(c: str) -> int:
+        return 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+    out, cur = "", 0
+    for c in s:
+        cw = w(c)
+        if cur + cw > width:
+            break
+        out += c
+        cur += cw
+    return out + " " * (width - cur)
+
+
+def list_kfx_books(documents: Path) -> list[dict]:
     """
-    documents/ 아래에서 (kfx_path, sdr_path, file_stem) 쌍을 모두 찾아 반환.
-    KFX 없이 .sdr만 있는 책, 또는 YJR이 없는 .sdr은 제외.
+    documents/ 직속 KFX 파일을 모두 나열하고 .sdr/YJR 상태를 함께 반환.
 
     Kindle은 .sdr 폴더와 책 파일이 documents/ 직속에 평탄하게 놓여 있으므로
     rglob 대신 한 단계 iterdir만 사용한다. (MacDroid FileProvider 같은 가상
     마운트에서 rglob은 모든 .sdr 내부까지 MTP로 재귀 탐색하여 매우 느리다.)
-    """
-    pairs: list[tuple[Path, Path, str]] = []
 
-    sdrs: list[Path] = []
+    Returns:
+        list of {"stem", "kfx": Path, "sdr": Path|None, "yjr_count": int}, sorted by stem.
+    """
     ebooks_by_stem: dict[str, Path] = {}   # 동일 stem에 여러 확장자가 있으면 _KFX_EXTS 순서로 우선
+    sdrs_by_stem: dict[str, Path] = {}
     try:
         for entry in documents.iterdir():
             name_lower = entry.name.lower()
             if name_lower.endswith(".sdr") and entry.is_dir():
-                sdrs.append(entry)
+                sdrs_by_stem[entry.stem] = entry
             else:
                 ext = entry.suffix.lower()
                 if ext in _KFX_EXTS and entry.is_file():
@@ -254,22 +283,48 @@ def find_kfx_sdr_pairs(documents: Path) -> list[tuple[Path, Path, str]]:
                     if existing is None or _KFX_EXTS.index(ext) < _KFX_EXTS.index(existing.suffix.lower()):
                         ebooks_by_stem[entry.stem] = entry
     except (PermissionError, OSError):
-        return pairs
+        return []
 
-    for sdr in sorted(sdrs):
-        stem = sdr.stem
-        kfx = ebooks_by_stem.get(stem)
-        if kfx is None:
-            continue
+    results: list[dict] = []
+    for stem in sorted(ebooks_by_stem):
+        sdr = sdrs_by_stem.get(stem)
+        yjr_count = 0
+        last_mtime: float = 0.0
+        kfx_path = ebooks_by_stem[stem]
         try:
-            has_yjr = any(f.suffix.lower() == ".yjr" for f in sdr.iterdir())
-        except (PermissionError, OSError):
-            continue
-        if not has_yjr:
-            continue
-        pairs.append((kfx, sdr, stem))
+            last_mtime = kfx_path.stat().st_mtime
+        except OSError:
+            pass
+        if sdr is not None:
+            try:
+                for f in sdr.iterdir():
+                    if f.suffix.lower() == ".yjr":
+                        yjr_count += 1
+                    try:
+                        m = f.stat().st_mtime
+                        if m > last_mtime:
+                            last_mtime = m
+                    except OSError:
+                        pass
+            except (PermissionError, OSError):
+                pass
+        results.append({
+            "stem": stem,
+            "kfx": kfx_path,
+            "sdr": sdr,
+            "yjr_count": yjr_count,
+            "last_mtime": last_mtime,
+        })
+    return results
 
-    return pairs
+
+def find_kfx_sdr_pairs(documents: Path) -> list[tuple[Path, Path, str]]:
+    """클리핑(YJR)이 있는 KFX+SDR 쌍만 반환. 처리 파이프라인 입력."""
+    return [
+        (b["kfx"], b["sdr"], b["stem"])
+        for b in list_kfx_books(documents)
+        if b["sdr"] is not None and b["yjr_count"] > 0
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +337,7 @@ def process_book(
     file_stem: str,
     seen_keys: Set[str],
     pbar: "tqdm",
+    title_cache: Optional[dict] = None,
 ) -> tuple[list[Clipping], str, str, int]:
     """
     YJR 파싱 → 신규 필터 → KFX 메타데이터·텍스트·페이지·KL 번호 채우기.
@@ -291,11 +347,18 @@ def process_book(
     """
     global _current_book
 
-    # 1. 메타데이터 (실제 제목·저자)
+    # 1. 메타데이터 (실제 제목·저자) — 캐시 hit 시 kfxlib 호출 생략
     _current_book = file_stem   # 메타데이터 추출 전: 파일명으로 초기화
     pbar.set_postfix_str(f"{file_stem[:40]}  메타데이터", refresh=True)
-    with _capture_stderr_to_log(file_stem):
-        meta = extract_kfx_metadata(kfx_path)
+
+    def _extract(p: Path) -> dict:
+        with _capture_stderr_to_log(file_stem):
+            return extract_kfx_metadata(p)
+
+    if title_cache is not None:
+        meta = get_or_extract_title(title_cache, kfx_path, _extract)
+    else:
+        meta = _extract(kfx_path)
     real_title = meta["title"]
     author     = meta["author"]
     _current_book = real_title  # 실제 제목으로 업데이트 → 이후 kfxlib 로그에 반영
@@ -366,30 +429,61 @@ def run_pipeline(args) -> int:
 
     documents = kindle_root / "documents"
 
-    # ── 2. KFX + .sdr 쌍 탐색 ────────────────────────────────────────────
-    print("\nKFX + YJR 쌍 탐색 중 …")
-    pairs = find_kfx_sdr_pairs(documents)
-    print(f"  발견: {len(pairs)}개 책")
+    # ── 2. KFX 책 + 클리핑 상태 탐색 ─────────────────────────────────────
+    print("\nKFX 책 탐색 중 …")
+    books = list_kfx_books(documents)
+    with_clips = [b for b in books if b["yjr_count"] > 0]
+    print(f"  KFX 총 {len(books)}권 (클리핑 있음: {len(with_clips)}권)")
 
     if args.book:
         patterns = [p.lower() for p in args.book]
-        filtered = [(k, s, st) for (k, s, st) in pairs
-                    if any(p in st.lower() for p in patterns)]
-        print(f"  --book 필터: {len(filtered)}개 매칭  (패턴: {', '.join(args.book)})")
-        if not filtered:
+        books = [b for b in books if any(p in b["stem"].lower() for p in patterns)]
+        with_clips = [b for b in books if b["yjr_count"] > 0]
+        print(f"  --book 필터: {len(books)}권 매칭 / 클리핑 {len(with_clips)}권  "
+              f"(패턴: {', '.join(args.book)})")
+        if not books:
             print("매칭되는 책이 없습니다. --list-books 로 stem 확인 후 다시 시도하세요.", file=sys.stderr)
             return 1
-        pairs = filtered
-
-    if not pairs:
-        print("처리할 책이 없습니다.")
-        return 0
 
     if args.list_books:
-        print(f"\n{'#':<4} {'파일명 (stem)':<55} 포맷")
-        print("-" * 70)
-        for i, (kfx, _, stem) in enumerate(pairs, 1):
-            print(f"{i:<4} {stem:<55} {kfx.suffix}")
+        if args.titles:
+            cache_path = Path(args.title_cache)
+            cache = load_title_cache(cache_path)
+            hits = 0
+
+            def _extract(p: Path) -> dict:
+                with _capture_stderr_to_log(p.stem):
+                    return extract_kfx_metadata(p)
+
+            print()
+            for b in tqdm(books, desc="제목 조회", unit="권", dynamic_ncols=True):
+                before = len(cache.get("books", {}))
+                meta = get_or_extract_title(cache, b["kfx"], _extract,
+                                            refresh=args.refresh_titles)
+                if len(cache.get("books", {})) == before and not args.refresh_titles:
+                    hits += 1
+                b["title"]  = meta["title"]
+                b["author"] = meta["author"]
+            save_title_cache(cache_path, cache)
+            print(f"  캐시 hit {hits}/{len(books)}  ({cache_path})")
+
+            print(f"\n{'#':<4} {_vis_pad('제목', 42)} {_vis_pad('저자', 20)} {'포맷':<6} 클리핑")
+            print("-" * 90)
+            for i, b in enumerate(books, 1):
+                status = _book_status(b)
+                print(f"{i:<4} {_vis_pad(b['title'], 42)} "
+                      f"{_vis_pad(b['author'], 20)} {b['kfx'].suffix:<6} {status}")
+        else:
+            print(f"\n{'#':<4} {'파일명 (stem)':<55} {'포맷':<6} 클리핑")
+            print("-" * 80)
+            for i, b in enumerate(books, 1):
+                status = _book_status(b)
+                print(f"{i:<4} {b['stem']:<55} {b['kfx'].suffix:<6} {status}")
+        return 0
+
+    pairs = [(b["kfx"], b["sdr"], b["stem"]) for b in with_clips]
+    if not pairs:
+        print("처리할 책이 없습니다.")
         return 0
 
     # ── 3. 상태 로드 ─────────────────────────────────────────────────────
@@ -408,16 +502,24 @@ def run_pipeline(args) -> int:
     all_new: list[Clipping] = []
     book_stats: list[dict]  = []
 
+    title_cache_path = Path(args.title_cache)
+    title_cache = load_title_cache(title_cache_path)
+
+    import os as _os
+    no_progress = args.no_progress or _os.environ.get("TQDM_DISABLE", "") in ("1", "true", "yes")
+
+    total = len(pairs)
     with tqdm(
         pairs,
         desc="책 처리",
         unit="권",
         dynamic_ncols=True,
+        disable=no_progress,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
     ) as pbar:
-        for kfx, sdr, stem in pbar:
+        for i, (kfx, sdr, stem) in enumerate(pbar, 1):
             new_clips, real_title, author, skipped = process_book(
-                kfx, sdr, stem, seen_keys, pbar
+                kfx, sdr, stem, seen_keys, pbar, title_cache=title_cache,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
@@ -425,11 +527,18 @@ def run_pipeline(args) -> int:
                 "title": real_title, "author": author,
                 "new": len(new_clips), "skipped": skipped,
             })
-            pbar.set_postfix_str(
-                f"{real_title[:35]}  +{len(new_clips)} / skip {skipped}",
-                refresh=True,
-            )
+            if no_progress:
+                print(
+                    f"[{i:>3}/{total}] {real_title[:50]}   +{len(new_clips)} new / skip {skipped}",
+                    flush=True,
+                )
+            else:
+                pbar.set_postfix_str(
+                    f"{real_title[:35]}  +{len(new_clips)} / skip {skipped}",
+                    refresh=True,
+                )
 
+    save_title_cache(title_cache_path, title_cache)
     print(f"\n총 신규 클리핑: {len(all_new)}개")
 
     if not all_new:
@@ -544,7 +653,17 @@ def main() -> None:
     parser.add_argument("--reset", action="store_true",
                         help="상태 파일 초기화 후 전체 재동기화")
     parser.add_argument("--list-books", action="store_true",
-                        help="KFX + YJR 쌍 목록만 출력하고 종료")
+                        help="documents/ 의 KFX 책 목록 + 클리핑 상태 출력 후 종료")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="tqdm 진행 바를 끄고 각 책의 결과를 1줄 print로 출력 "
+                             "(TUI·로그 캡처용. TQDM_DISABLE=1 환경변수로도 활성화)")
+    parser.add_argument("--titles", action="store_true",
+                        help="--list-books 에 KFX 메타데이터로 실제 제목·저자 표시 "
+                             "(권당 kfxlib 호출이 들어가 느려짐, 결과는 캐싱됨)")
+    parser.add_argument("--title-cache", default=str(DEFAULT_TITLE_CACHE), metavar="FILE",
+                        help=f"제목·저자 캐시 경로 (기본값: {DEFAULT_TITLE_CACHE})")
+    parser.add_argument("--refresh-titles", action="store_true",
+                        help="--titles 캐시를 무시하고 강제 재추출")
     parser.add_argument("--book", action="append", default=None, metavar="PATTERN",
                         help="특정 책만 처리 (stem 파일명 substring, 대소문자 무시). "
                              "여러 번 지정 가능: --book A --book B")

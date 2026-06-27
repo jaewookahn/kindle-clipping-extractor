@@ -17,13 +17,15 @@ kindle/
 ├── scanner.py         — documents/ 스캔, KFX+YJR 쌍 탐색
 ├── exporters.py       — sync_export_* (CSV/Markdown/Text/JSON 출력)
 ├── notion_export.py   — Notion 동기화 (fingerprint·상태 파일·Notion API)
+├── title_cache.py     — KFX 메타데이터(제목·저자) 디스크 캐시
 └── parsers/
     ├── my_clippings.py — My Clippings.txt 파서, is_limit_exceeded()
     ├── yjr.py          — YJR/YJF 바이너리 파서 (TLV, char offset)
     ├── apnx.py         — APNX 페이지 인덱스 파서
     └── mbp.py          — MBP 어노테이션 파서
 
-sync_kfx.py                  — 메인 워크플로 (KFX+YJR → Notion)
+sync_kfx.py                  — 메인 워크플로 (KFX+YJR → Notion). --titles, --refresh-titles
+tui.py                       — Textual TUI (책 목록 + 클리핑 미리보기 + sync 옵션 모달)
 sync_clippings_to_notion.py  — 보충 워크플로 (My Clippings.txt → Notion)
 parse_clippings.py           — 단일 파일/디렉터리 파싱 후 파일 출력
 sync_clippings.py            — My Clippings.txt 증분 동기화 (파일 출력 전용)
@@ -80,6 +82,23 @@ class Clipping:
 ```
 
 `kindle/notion_export.py` 의 `fingerprint()`, `load_state()`, `save_state()` 가 관리한다.
+
+---
+
+## 제목 캐시
+
+- 경로: `~/.kindle_kfx_titles.json`
+- kfxlib 로 추출한 제목·저자를 절대 경로 키로 보관
+- 무효화: 파일의 `mtime` 또는 `size` 가 캐시와 다르면 자동 재추출
+- `sync_kfx.py --titles` (list 표시) 및 `process_book` (sync 시 메타데이터) 양쪽에서 공유
+- 강제 재추출: `--refresh-titles`
+
+```python
+# kindle/title_cache.py
+load_cache(path) -> dict
+get_or_extract(cache, kfx_path, extractor, refresh=False) -> {"title", "author"}
+save_cache(path, cache)
+```
 
 ---
 

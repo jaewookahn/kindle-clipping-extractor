@@ -470,39 +470,72 @@ def _is_kindle_volume(vol: Path) -> bool:
     return (vol / "system").is_dir()
 
 
-def find_kindle() -> Optional[Path]:
-    """Return the root path of a Kindle already mounted by the OS, or None.
+def _candidate_info(path: Path, source: str) -> dict:
+    """후보 경로의 메타데이터(가장 최근 documents/ 자식 mtime, 라벨) 수집."""
+    docs = path / "documents"
+    latest_mtime: float = 0.0
+    file_count: int = 0
+    try:
+        for entry in docs.iterdir():
+            file_count += 1
+            try:
+                m = entry.stat().st_mtime
+                if m > latest_mtime:
+                    latest_mtime = m
+            except OSError:
+                pass
+    except (PermissionError, OSError):
+        pass
 
-    Scans all mounted volumes/drives rather than checking a fixed path, so
-    it finds the Kindle even when macOS names it ``Kindle 1``, ``KINDLE``, etc.
-    Also recognises MacDroid FileProvider mounts under ``~/Library/CloudStorage/``.
+    # 라벨: MacDroid-KindleScribe → KindleScribe, /Volumes/Kindle → Kindle
+    label = path.name
+    if source == "macdroid":
+        # 한 단계 상위가 MacDroid-* 폴더
+        label = path.parent.name.removeprefix("MacDroid-")
+    return {
+        "path":         path,
+        "source":       source,    # "volumes" | "macdroid" | "linux"
+        "label":        label,
+        "latest_mtime": latest_mtime,
+        "file_count":   file_count,
+    }
+
+
+def find_kindle_candidates() -> list[dict]:
+    """모든 Kindle 후보 마운트 경로를 반환. 가장 최근 활동 순으로 정렬.
+
+    Each item: {"path", "source", "label", "latest_mtime", "file_count"}.
+    빈 documents/ 를 가진(=stale) 후보도 포함된다 — 호출자가 판단.
     """
-    # macOS: scan every volume under /Volumes/
+    out: list[dict] = []
+
+    # macOS: /Volumes/
     volumes = Path("/Volumes")
     if volumes.exists():
         try:
             for vol in sorted(volumes.iterdir()):
                 if _is_kindle_volume(vol):
-                    return vol
+                    out.append(_candidate_info(vol, "volumes"))
         except (PermissionError, OSError):
             pass
 
-    # macOS + MacDroid: MTP-only Kindles (Scribe 등 mass-storage 미지원 모델)은
-    # MacDroid FileProvider 확장으로 마운트되어 /Volumes에 안 잡힌다.
-    # 경로 패턴: ~/Library/CloudStorage/MacDroid-<DeviceName>/Internal Storage/
+    # macOS + MacDroid: ~/Library/CloudStorage/MacDroid-<DeviceName>/Internal Storage/
+    # 폴더명에 "Kindle"이 들어가면 Kindle 디바이스로 간주 (system/ 폴더가 안 보여도 통과).
     cloudstorage = Path.home() / "Library" / "CloudStorage"
     if cloudstorage.exists():
         try:
             for entry in sorted(cloudstorage.iterdir()):
                 if not entry.name.startswith("MacDroid-"):
                     continue
+                if "kindle" not in entry.name.lower():
+                    continue
                 inner = entry / "Internal Storage"
-                if _is_kindle_volume(inner):
-                    return inner
+                if inner.is_dir() and (inner / "documents").is_dir():
+                    out.append(_candidate_info(inner, "macdroid"))
         except (PermissionError, OSError):
             pass
 
-    # Linux: scan /media/$USER/* and /run/media/$USER/*
+    # Linux: /media/$USER/*, /run/media/$USER/*
     for base in (Path("/media"), Path("/run/media")):
         if not base.exists():
             continue
@@ -512,11 +545,24 @@ def find_kindle() -> Optional[Path]:
                     continue
                 for vol in sorted(user_dir.iterdir()):
                     if _is_kindle_volume(vol):
-                        return vol
+                        out.append(_candidate_info(vol, "linux"))
         except (PermissionError, OSError):
             pass
 
-    return None
+    # 활동(최근 mtime) 내림차순. mtime 동일하면 file_count 내림차순.
+    out.sort(key=lambda d: (d["latest_mtime"], d["file_count"]), reverse=True)
+    return out
+
+
+def find_kindle() -> Optional[Path]:
+    """Return the root path of a Kindle already mounted by the OS, or None.
+
+    Picks the most recently active candidate (sorted by documents/ mtime).
+    When multiple candidates may be present (e.g., stale MacDroid mount + new
+    device), call ``find_kindle_candidates()`` directly for an interactive choice.
+    """
+    cands = find_kindle_candidates()
+    return cands[0]["path"] if cands else None
 
 
 # ---------------------------------------------------------------------------

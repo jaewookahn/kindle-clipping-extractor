@@ -39,11 +39,68 @@ Kindle 기기의 하이라이트·메모·북마크를 여러 형식에서 파�
 
 | 스크립트 | 실행 방식 | 용도 |
 |----------|-----------|------|
+| `tui.py` | 대화형 | Textual TUI — 책 탐색·정렬·필터·표지/클리핑 미리보기·동기화 |
 | `sync_kfx.py` | 킨들 연결 후 자동 | KFX+YJR → Notion (메인 워크플로) |
 | `sync_clippings_to_notion.py` | 수동 보충 | My Clippings.txt → Notion |
 | `parse_clippings.py` | 단독 실행 | 단일 파일/디렉터리 파싱 후 파일 출력 |
 | `sync_clippings.py` | 단독 실행 | My Clippings.txt 증분 동기화 (파일 출력 전용) |
 | `recover_clippings.py` | 단독 실행 | My Clippings.txt 한도 초과 텍스트 복구 |
+
+---
+
+## 대화형 TUI (`tui.py`)
+
+`sync_kfx.py` 의 모든 기능을 키보드로 다룰 수 있는 Textual TUI. Catppuccin Mocha
+팔레트로 256-color 터미널에서 보기 좋게 렌더링된다.
+
+```bash
+python tui.py                                # 자동 감지
+python tui.py --kindle "<경로>"              # 경로 직접 지정
+```
+
+### 구성
+
+- **상단**: 그라데이션 로고 + 현재 키 힌트
+- **Status Bar**: 현재 디바이스 / 책 개수 / 클리핑 책수 / Notion 업로드 책수 / last sync
+- **Books Table**: 책 목록 — `제목 / 저자 / 포맷 / YJR / Notion / 최종수정`
+- **Footer**: 키바인딩 표시
+
+### 키바인딩
+
+| 키 | 동작 |
+|---|---|
+| `↑/↓` | 책 이동 |
+| `/` | 제목·저자·파일명 필터 (Esc 로 해제) |
+| `Enter` | 클리핑 미리보기 모달 (표지 + 클리핑 표) |
+| `s` | 동기화 옵션 모달 (dry-run / 파일 저장 / Notion 업로드 / reset) |
+| `k` | Kindle 기기 변경 (여러 후보 감지 시) |
+| `r` | 현재 필터 책의 제목 강제 재추출 (캐시 무효화) |
+| `1`–`6` | 컬럼별 정렬 (제목/저자/포맷/YJR/Notion/최종수정), 같은 키 두 번 = 방향 토글 |
+| `0` | 원래(stem) 정렬 |
+| `q` | 종료 |
+
+### 클리핑 미리보기
+
+- 좌측 32 칸: **Google Books 표지** (textual-image, Half-block/iTerm2/Kitty 자동 선택)
+- 우측: 클리핑 표 (`# / 타입 / 색 / 페이지 / 위치 / 날짜 / 내용`)
+- 색상: yellow/blue/pink/orange chip 으로 시각화
+- 북마크는 의미 없는 단일-문자 텍스트 대신 `—` 표시
+- 내용은 CJK 셀 너비를 인식해 자동 워드랩 (잘림 없음)
+
+### 동기화 모달
+
+- 체크박스: dry-run / 파일 저장 (경로 직접 지정) / Notion 업로드 / 상태 초기화
+- 필터 적용 중이면 그 책들만 대상 (`--book` 으로 전달), 아니면 전체
+- `sync_kfx.py --no-progress` 를 subprocess 로 호출, stdout 라인 스트리밍
+- Notion 업로드 사용 시 `NOTION_TOKEN` + `NOTION_DB` 환경변수 필요
+
+### 제목 캐시
+
+KFX 메타데이터 추출은 kfxlib 호출이 권당 수백 ms 들기 때문에, 한 번 추출한 결과를
+**절대 경로 → (제목, 저자, mtime, size)** 로 `~/.kindle_kfx_titles.json` 에 저장한다.
+파일이 갱신되거나 교체되면 mtime/size 가 바뀌어 자동 무효화.
+
+`sync_kfx.py --titles` 와 TUI 양쪽에서 공유 → 한 번 추출하면 이후엔 즉시.
 
 ---
 
@@ -95,7 +152,12 @@ python sync_kfx.py --notion-db $NOTION_DB
 -f FORMAT               출력 형식: json | csv | markdown | text
 --dry-run               저장 없이 신규 항목 목록만 출력
 --reset                 상태 초기화 후 전체 재동기화
---list-books            KFX+YJR 쌍 목록만 출력
+--list-books            documents/ 의 KFX 책 목록 + 클리핑 상태 출력
+--titles                --list-books 에 KFX 메타데이터로 실제 제목·저자 표시
+--refresh-titles        --titles 캐시 무시하고 강제 재추출
+--title-cache FILE      제목·저자 캐시 경로 (기본값: ~/.kindle_kfx_titles.json)
+--book PATTERN          특정 책만 처리 (stem substring, 여러 번 지정 가능)
+--no-progress           tqdm 진행 바 끄고 책당 1줄 print (TUI·로그 캡처용)
 --kindle PATH           킨들 마운트 경로 직접 지정 (생략 시 자동 감지)
 --log FILE              로그 파일 경로 (기본값: kindle_sync.log)
 ```
