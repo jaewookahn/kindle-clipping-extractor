@@ -183,9 +183,13 @@ class ClippingPreview(ModalScreen):
 
     CSS = """
     ClippingPreview { align: center middle; }
+    /* 베벨 — 위/왼쪽은 밝게(빛), 오른/아래는 어둡게(그림자) → 튀어나와 보이는 입체 */
     #preview-box {
         width: 92%; height: 90%;
-        border: double #babbf1;
+        border-top: heavy #c6d0f5;
+        border-left: heavy #c6d0f5;
+        border-right: heavy #1a1a28;
+        border-bottom: heavy #1a1a28;
         background: #303446;
         padding: 1 2;
     }
@@ -805,7 +809,10 @@ class KindlePicker(ModalScreen):
     KindlePicker { align: center middle; }
     #picker-box {
         width: 90%; height: 60%;
-        border: double #babbf1;
+        border-top: heavy #c6d0f5;
+        border-left: heavy #c6d0f5;
+        border-right: heavy #1a1a28;
+        border-bottom: heavy #1a1a28;
         background: #303446;
         padding: 1 2;
     }
@@ -889,7 +896,10 @@ class SyncOptions(ModalScreen):
     #sync-box {
         width: 88%; height: 88%;
         max-width: 120;
-        border: double #babbf1;
+        border-top: heavy #c6d0f5;
+        border-left: heavy #c6d0f5;
+        border-right: heavy #1a1a28;
+        border-bottom: heavy #1a1a28;
         background: #303446;
         padding: 1 3;
     }
