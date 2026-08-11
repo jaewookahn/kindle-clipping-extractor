@@ -5,9 +5,26 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
-from kindle.models import Clipping, APNXInfo
+from kindle.models import Clipping, APNXInfo, Chapter
+
+
+def _chapter_dicts(chapters: List[Chapter]) -> List[dict]:
+    """Chapter → JSON 직렬화용 dict (None 필드는 제거)."""
+    out: List[dict] = []
+    for c in chapters:
+        d = {
+            "title":  c.title,      # breadcrumb — 계층이 그대로 들어 있음
+            "leaf":   c.leaf,
+            "level":  c.level,
+            "page_start":     c.page_start,
+            "page_end":       c.page_end,
+            "location_start": c.location_start,
+            "location_end":   c.location_end,
+        }
+        out.append({k: v for k, v in d.items() if v is not None})
+    return out
 
 # ---------------------------------------------------------------------------
 # Sync-pipeline export helpers  (used by sync_kfx.py and sync_clippings.py)
@@ -21,6 +38,29 @@ def _sync_clip_dict(c: Clipping, *, strip_keys: tuple = ()) -> dict:
     return {k: v for k, v in d.items() if v is not None and v != "" and v is not False}
 
 
+def _chapter_outline_md(chapters: Optional[List[Chapter]]) -> List[str]:
+    """책 제목 아래에 넣을 목차 블록 (중첩 목록). 챕터가 없으면 빈 리스트."""
+    if not chapters:
+        return []
+    out = ["<details>", "<summary>목차 — 챕터별 범위</summary>", ""]
+    for c in chapters:
+        rng: List[str] = []
+        if c.page_start is not None:
+            r = str(c.page_start)
+            if c.page_end is not None and c.page_end != c.page_start:
+                r += f"–{c.page_end}"
+            rng.append(f"p.{r}")
+        if c.location_start is not None:
+            r = str(c.location_start)
+            if c.location_end is not None and c.location_end != c.location_start:
+                r += f"–{c.location_end}"
+            rng.append(f"Loc {r}")
+        suffix = f" — {' · '.join(rng)}" if rng else ""
+        out.append(f"{'  ' * c.level}- {c.leaf}{suffix}")
+    out += ["", "</details>", ""]
+    return out
+
+
 def sync_export_csv(clippings: List[Clipping], out: Path) -> None:
     fields = ["book_title", "author", "clip_type", "page",
               "location_start", "location_end", "added_date", "content"]
@@ -31,7 +71,10 @@ def sync_export_csv(clippings: List[Clipping], out: Path) -> None:
             w.writerow({k: getattr(c, k, "") or "" for k in fields})
 
 
-def sync_export_markdown(clippings: List[Clipping], out: Path, heading: str = "킨들 클리핑") -> None:
+def sync_export_markdown(clippings: List[Clipping], out: Path,
+                         heading: str = "킨들 클리핑",
+                         chapters_by_book: Optional[Dict[str, List[Chapter]]] = None
+                         ) -> None:
     lines = [f"# {heading}  ·  {datetime.now():%Y-%m-%d %H:%M}\n"]
     current_book = None
     for c in clippings:
@@ -40,6 +83,8 @@ def sync_export_markdown(clippings: List[Clipping], out: Path, heading: str = "�
             lines.append(f"\n## {c.book_title}")
             if c.author:
                 lines.append(f"*{c.author}*\n")
+            for line in _chapter_outline_md((chapters_by_book or {}).get(c.book_title)):
+                lines.append(line)
         loc = f"Location {c.location_start}"
         if c.location_end and c.location_end != c.location_start:
             loc += f"–{c.location_end}"
@@ -79,8 +124,14 @@ def sync_export_json_flat(clippings: List[Clipping], out: Path, meta: dict) -> N
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def sync_export_json_grouped(clippings: List[Clipping], out: Path, meta: dict) -> None:
-    """Book-grouped with per-type counts — used by sync_kfx.py."""
+def sync_export_json_grouped(clippings: List[Clipping], out: Path, meta: dict,
+                             chapters_by_book: Optional[Dict[str, List[Chapter]]] = None
+                             ) -> None:
+    """Book-grouped with per-type counts — used by sync_kfx.py.
+
+    chapters_by_book 가 있으면 각 책에 "chapters" (챕터별 페이지·Location
+    범위) 를 넣는다. 클리핑을 나중에 정리할 때 어느 장에 속하는지 되짚는 근거.
+    """
     strip = ("book_title", "author", "source_file")
     books: dict[str, dict] = {}
     for c in clippings:
@@ -103,9 +154,15 @@ def sync_export_json_grouped(clippings: List[Clipping], out: Path, meta: dict) -
         b["clippings"].append(_sync_clip_dict(c, strip_keys=strip))
 
     book_list = []
-    for b in books.values():
+    for title, b in books.items():
         if not b["author"]:
             del b["author"]
+        chapters = (chapters_by_book or {}).get(title)
+        if chapters:
+            # clippings 앞에 오도록 키 순서를 다시 잡는다
+            clips = b.pop("clippings")
+            b["chapters"]  = _chapter_dicts(chapters)
+            b["clippings"] = clips
         book_list.append(b)
 
     payload = {**meta, "books": book_list}

@@ -432,6 +432,87 @@ def fill_clipping_chapters(clippings: List[Clipping], toc: List[tuple]) -> None:
             c.chapter = titles[idx]
 
 
+def _page_label_at(page_offsets: List[int], page_labels: List[str],
+                   char: int) -> Optional[int]:
+    """char offset 이 속한 페이지 번호. 숫자가 아닌 라벨(로마자 등)은 None."""
+    import bisect
+    idx = bisect.bisect_right(page_offsets, char) - 1
+    if idx < 0:
+        return None
+    try:
+        return int(page_labels[idx])
+    except ValueError:
+        return None
+
+
+def _kl_at(kl_offsets: List[int], char: int) -> int:
+    """char offset → Kindle Location 번호 (fill_clipping_kindle_locations 와 동일 규칙)."""
+    import bisect
+    kl = bisect.bisect_right(kl_offsets, char)
+    return kl if kl > 0 else 1
+
+
+def _is_descendant(child: str, parent: str) -> bool:
+    """breadcrumb 기준으로 child 가 parent 의 하위 챕터인지."""
+    return child.startswith(parent + " › ")
+
+
+def build_chapter_ranges(
+    toc: Optional[List[tuple]],
+    page_map: Optional[List[tuple]] = None,
+    kl_offsets: Optional[List[int]] = None,
+    text_len: Optional[int] = None,
+) -> List["Chapter"]:
+    """TOC 를 챕터별 페이지·Location 범위로 확장한다.
+
+    Args:
+        toc:        extract_kfx_info() 의 [(char_offset, breadcrumb), …] (정렬됨)
+        page_map:   [(page_label, char_offset), …] — 없으면 page_* 가 None
+        kl_offsets: Kindle Location 경계 — 없으면 location_* 가 None
+        text_len:   본문 길이. 마지막 챕터의 끝으로 쓴다.
+
+    각 챕터의 끝은 "다음에 오는, 자기 자손이 아닌 TOC 항목"의 시작이다.
+    부모 챕터와 첫 자식은 보통 같은 offset 을 가리키므로 단순히 다음
+    항목까지로 자르면 부모가 길이 0 이 된다.
+
+    Returns:
+        List[Chapter] — toc 와 같은 순서. toc 가 비면 빈 리스트.
+    """
+    from kindle.models import Chapter
+
+    if not toc:
+        return []
+
+    page_offsets = [off for _, off in page_map] if page_map else []
+    page_labels  = [lbl for lbl, _ in page_map] if page_map else []
+
+    n = len(toc)
+    fallback_end = text_len if text_len is not None else toc[-1][0]
+
+    chapters: List[Chapter] = []
+    for i, (start, crumb) in enumerate(toc):
+        end = fallback_end
+        for j in range(i + 1, n):
+            if not _is_descendant(toc[j][1], crumb):
+                end = toc[j][0]
+                break
+        end = max(end, start)
+
+        # 끝 위치는 마지막 문자(inclusive)로 조회해야 다음 챕터 페이지를 물지 않는다
+        last_char = end - 1 if end > start else start
+
+        ch = Chapter(title=crumb, char_start=start, char_end=end)
+        if page_offsets:
+            ch.page_start = _page_label_at(page_offsets, page_labels, start)
+            ch.page_end   = _page_label_at(page_offsets, page_labels, last_char)
+        if kl_offsets:
+            ch.location_start = _kl_at(kl_offsets, start)
+            ch.location_end   = _kl_at(kl_offsets, last_char)
+        chapters.append(ch)
+
+    return chapters
+
+
 def fill_clipping_kindle_locations(
     clippings: List[Clipping], kindle_loc_offsets: List[int]
 ) -> None:

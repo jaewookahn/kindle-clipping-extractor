@@ -155,6 +155,36 @@ parse_yjr()                  # char offset 기반 클리핑 위치 추출
 `extract_kfx_info()` 는 `(page_map, kl_offsets, book_text, toc)` 4-tuple 을 돌려준다.
 `toc` 는 `[(char_offset, breadcrumb), …]` — breadcrumb 은 중첩 챕터를 ` › ` 로 연결.
 
+`build_chapter_ranges(toc, page_map, kl_offsets, text_len)` 도 **KL 변환 전**에
+호출한다 (page_map·kl_offsets 와 좌표계를 맞춰야 함).
+
+---
+
+## 챕터 범위 (Chapter)
+
+`kindle/models.py` 의 `Chapter` — 각 TOC 항목이 차지하는 페이지·Location 범위.
+
+```python
+Chapter(title="제1장 › 1. 부르주아와 프롤레타리아",  # breadcrumb
+        char_start=5391, char_end=17951,
+        page_start=13, page_end=32,
+        location_start=113, location_end=358)
+c.level  # 중첩 깊이 (breadcrumb 의 " › " 개수)
+c.leaf   # breadcrumb 마지막 조각
+```
+
+**챕터 끝 = "다음에 오는, 자기 자손이 아닌 TOC 항목의 시작"**.
+KFX 는 부모 챕터와 첫 자식이 같은 char offset 을 가리키는 경우가 많아,
+단순히 "다음 항목까지"로 자르면 부모 범위가 길이 0 이 된다.
+
+출력 위치 (모두 클리핑 **앞**):
+- Notion 본문 — `format_chapter_outline()`. **신규 페이지 생성 시와
+  `--rewrite-bodies` 때만** 반영 (Notion append 는 끝에만 붙는다)
+- JSON (`sync_export_json_grouped`) — 책 dict 의 `"chapters"` 키
+- Markdown (`sync_export_markdown`) — `<details>` 접이식 목차
+
+`--no-chapter-outline` 으로 끈다.
+
 ---
 
 ## 테스트

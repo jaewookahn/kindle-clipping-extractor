@@ -64,6 +64,7 @@ from kindle.parsers.yjr import parse_yjr
 from kindle.ebook import (
     extract_kfx_metadata,
     extract_kfx_info,
+    build_chapter_ranges,
     fill_clipping_text,
     fill_clipping_pages,
     fill_clipping_chapters,
@@ -342,7 +343,7 @@ def process_book(
     seen_keys: Set[str],
     pbar: "tqdm",
     title_cache: Optional[dict] = None,
-) -> tuple[list[Clipping], list[str], str, str, int]:
+) -> tuple[list[Clipping], list[str], str, str, int, list]:
     """
     YJR 파싱 → 신규 필터 → KFX 메타데이터·텍스트·페이지·KL 번호 채우기.
 
@@ -351,7 +352,8 @@ def process_book(
     재실행 시 동일 클리핑이 다시 "신규" 로 잡히지 않는다.
 
     Returns:
-        (new_clippings, new_fingerprints, real_title, author, skipped_count)
+        (new_clippings, new_fingerprints, real_title, author, skipped_count, chapters)
+        chapters 는 이 책의 [Chapter, …] (TOC 없으면 빈 리스트).
     """
     global _current_book
 
@@ -381,7 +383,7 @@ def process_book(
         all_clips.extend(clips)
 
     if not all_clips:
-        return [], [], real_title, author, 0
+        return [], [], real_title, author, 0, []
 
     # fingerprint 는 fill 전 raw char offset 기준으로 한 번에 계산
     fingerprints = [_fingerprint(c) for c in all_clips]
@@ -391,7 +393,7 @@ def process_book(
     skipped   = len(all_clips) - len(new_clips)
 
     if not new_clips:
-        return [], [], real_title, author, skipped
+        return [], [], real_title, author, skipped, []
 
     # 3. KFX 텍스트·페이지·KL 번호 추출
     pbar.set_postfix_str(f"{real_title[:40]}  KFX 추출", refresh=True)
@@ -406,15 +408,21 @@ def process_book(
     if page_map:
         fill_clipping_pages(new_clips, page_map)
 
+    chapters: list = []
     if toc:
         fill_clipping_chapters(new_clips, toc)
+        # 챕터 범위는 raw char offset 기준 맵을 쓰므로 KL 변환 전에 계산한다
+        # (변환 후에는 page_map·kl_offsets 와 좌표계가 어긋난다).
+        chapters = build_chapter_ranges(
+            toc, page_map, kl_offsets, len(book_text) if book_text else None,
+        )
 
     if kl_offsets:
         fill_clipping_kindle_locations(new_clips, kl_offsets)
     else:
         logger.warning("[%s] Kindle Location 맵 없음 — location 번호가 raw offset으로 남음", real_title)
 
-    return new_clips, new_fps, real_title, author, skipped
+    return new_clips, new_fps, real_title, author, skipped, chapters
 
 
 
@@ -525,6 +533,7 @@ def run_pipeline(args) -> int:
     all_new: list[Clipping] = []
     all_new_fps: list[str]  = []
     book_stats: list[dict]  = []
+    chapters_by_book: dict[str, list] = {}
 
     title_cache_path = Path(args.title_cache)
     title_cache = load_title_cache(title_cache_path)
@@ -544,12 +553,14 @@ def run_pipeline(args) -> int:
         # rewrite-bodies: dedup 무시하고 전체 클리핑을 다시 끌어온다
         effective_seen = set() if args.rewrite_bodies else seen_keys
         for i, (kfx, sdr, stem) in enumerate(pbar, 1):
-            new_clips, new_fps, real_title, author, skipped = process_book(
+            new_clips, new_fps, real_title, author, skipped, chapters = process_book(
                 kfx, sdr, stem, effective_seen, pbar, title_cache=title_cache,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
             all_new_fps.extend(new_fps)
+            if chapters and not args.no_chapter_outline:
+                chapters_by_book[real_title] = chapters
             book_stats.append({
                 "title": real_title, "author": author,
                 "new": len(new_clips), "skipped": skipped,
@@ -608,11 +619,13 @@ def run_pipeline(args) -> int:
         }
 
         if fmt == "json":
-            sync_export_json_grouped(all_new, out_path, meta)
+            sync_export_json_grouped(all_new, out_path, meta,
+                                     chapters_by_book=chapters_by_book)
         elif fmt == "csv":
             sync_export_csv(all_new, out_path)
         elif fmt == "markdown":
-            sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑")
+            sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑",
+                                 chapters_by_book=chapters_by_book)
         else:
             sync_export_text(all_new, out_path)
         print(f"저장: {out_path}")
@@ -628,6 +641,7 @@ def run_pipeline(args) -> int:
             enable_book_cover=not args.no_cover,
             rewrite=args.rewrite_bodies,
             clip_fps=all_new_fps,   # PRE-KL fingerprint 전달 → synced_fingerprints도 PRE-KL 기준
+            chapters_by_book=chapters_by_book,
         )
         print(
             f"Notion 완료: 추가 {result['added']}개 / skip {result['skipped']}개"
@@ -723,6 +737,10 @@ def main() -> None:
                         help=f"Notion 상태 파일 경로 (기본값: {NOTION_DEFAULT_STATE})")
     parser.add_argument("--no-cover", action="store_true",
                         help="Notion 페이지에 책 표지 추가 안 함")
+    parser.add_argument("--no-chapter-outline", action="store_true",
+                        help="클리핑 앞에 챕터별 페이지·Location 범위 목차를 넣지 않음 "
+                             "(기본: KFX 목차가 있으면 넣음). Notion 에서는 페이지를 "
+                             "새로 만들 때와 --rewrite-bodies 때만 반영된다.")
     args = parser.parse_args()
 
     # NOTION_TOKEN / NOTION_DB 환경변수 폴백 (.env 포함)

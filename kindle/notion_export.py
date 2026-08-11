@@ -91,6 +91,39 @@ def _format_clipping(c: Clipping) -> str:
     return f"{prefix}{content}\n{meta}\n\n".strip() + "\n\n"
 
 
+def format_chapter_range(c: "Chapter") -> str:
+    """한 챕터의 범위를 'p.12–62 · Loc 110–760' 형태로."""
+    parts: List[str] = []
+    if c.page_start is not None:
+        rng = str(c.page_start)
+        if c.page_end is not None and c.page_end != c.page_start:
+            rng += f"–{c.page_end}"
+        parts.append(f"p.{rng}")
+    if c.location_start is not None:
+        rng = str(c.location_start)
+        if c.location_end is not None and c.location_end != c.location_start:
+            rng += f"–{c.location_end}"
+        parts.append(f"Loc {rng}")
+    return " · ".join(parts)
+
+
+def format_chapter_outline(chapters: List["Chapter"]) -> str:
+    """챕터 목차를 클리핑 본문 앞에 넣을 텍스트 블록으로.
+
+    중첩은 들여쓰기로 표현하고 제목은 breadcrumb 의 마지막 조각만 쓴다
+    (전체 경로를 매 줄에 반복하면 길어지기만 한다). 이 블록만 읽어도
+    어떤 하이라이트가 어느 챕터에 속하는지 페이지·Location 으로 되짚을 수 있다.
+    """
+    if not chapters:
+        return ""
+    lines = ["【목차 — 챕터별 범위】"]
+    for c in chapters:
+        indent = "  " * c.level
+        rng = format_chapter_range(c)
+        lines.append(f"{indent}{c.leaf}" + (f"  ·  {rng}" if rng else ""))
+    return "\n".join(lines) + "\n\n"
+
+
 def _split_chunks(text: str, max_len: int = 2000) -> List[str]:
     chunks: List[str] = []
     while len(text) > max_len:
@@ -464,6 +497,7 @@ def sync_to_notion(
     enable_book_cover: bool = True,
     rewrite: bool = False,
     clip_fps: Optional[List[str]] = None,
+    chapters_by_book: Optional[Dict[str, list]] = None,
 ) -> dict:
     """Sync clippings to a Notion database.
 
@@ -475,6 +509,11 @@ def sync_to_notion(
     페이지 본문을 통째로 지운 뒤 전달된 모든 클리핑으로 다시 채운다.
     클리핑 포맷이 바뀌었을 때(예: 챕터 정보 추가) 백필용. fingerprint
     상태는 위치 기반이라 그대로 유지된다.
+
+    chapters_by_book: {책 제목: [Chapter, …]} — 있으면 본문 맨 앞에 챕터
+    목차(페이지·Location 범위)를 쓴다. Notion append 는 끝에만 붙일 수 있어
+    앞에 끼워 넣을 수 없으므로, 페이지를 새로 만들 때와 rewrite 때만 반영된다.
+    기존 페이지에 목차를 넣으려면 --rewrite-bodies 로 다시 쓸 것.
 
     Returns:
         {"added": int, "skipped": int, "books_new": int, "books_updated": int}
@@ -548,6 +587,11 @@ def sync_to_notion(
 
         formatted = [_format_clipping(c) for c in content_clips]
 
+        # 챕터 목차는 본문 맨 앞에. append 는 끝에만 붙으므로 신규 생성/rewrite 에서만.
+        outline = ""
+        if chapters_by_book:
+            outline = format_chapter_outline(chapters_by_book.get(title) or [])
+
         title_author = f"{title} ({author})" if author else title
         print(title_author, flush=True)
         print("-" * len(title_author), flush=True)
@@ -570,11 +614,11 @@ def sync_to_notion(
                 last_date, enable_book_cover,
             )
             book_state["notion_page_id"] = page_id
-            _append_clippings(api, page_id, formatted)
+            _append_clippings(api, page_id, ([outline] if outline else []) + formatted)
             summary["books_new"] += 1
             print(f"  ✓ 새 페이지 생성", flush=True)
         elif rewrite:
-            _rewrite_page_body(api, page_id, formatted)
+            _rewrite_page_body(api, page_id, ([outline] if outline else []) + formatted)
             _update_page_properties(api, page_id, highlight_count_for_props, last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
