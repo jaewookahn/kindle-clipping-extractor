@@ -22,6 +22,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from textual         import on, events
 from textual.app    import App, ComposeResult
 from textual.binding import Binding

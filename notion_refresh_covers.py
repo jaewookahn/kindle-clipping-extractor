@@ -20,6 +20,9 @@ import sys
 import time
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import requests
 
 from kindle.notion_export import _get_cover_url

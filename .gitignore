@@ -1,3 +1,6 @@
+# 환경변수
+.env
+
 # Python
 __pycache__/
 *.py[cod]

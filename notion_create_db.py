@@ -24,6 +24,8 @@ import re
 import sys
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
 
 NOTION_API     = "https://api.notion.com/v1/databases"
 NOTION_VERSION = "2022-06-28"

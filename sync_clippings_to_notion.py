@@ -30,6 +30,9 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from kindle.parsers.my_clippings import parse_my_clippings, is_limit_exceeded
 from kindle.ebook import _find_kfx_plugin, extract_kfx_info
 from kindle.models import Clipping
@@ -90,7 +93,7 @@ def main() -> None:
     parser.add_argument("--notion-token", default=None, metavar="TOKEN",
                         help="Notion 통합 토큰 (NOTION_TOKEN 환경변수로도 설정 가능)")
     parser.add_argument("--notion-db", default=None, metavar="DB_ID",
-                        help="업로드할 Notion 데이터베이스 ID")
+                        help="업로드할 Notion 데이터베이스 ID (NOTION_DB 환경변수로도 설정 가능)")
     parser.add_argument("--notion-state", default=str(DEFAULT_STATE), metavar="FILE",
                         help=f"Notion 상태 파일 경로 (기본값: {DEFAULT_STATE})")
     parser.add_argument("--book", default=None, metavar="TITLE",
@@ -105,8 +108,10 @@ def main() -> None:
                         help="업로드 없이 신규 항목 목록만 출력")
     args = parser.parse_args()
 
-    # NOTION_TOKEN 환경변수 폴백
+    # NOTION_TOKEN / NOTION_DB 환경변수 폴백 (.env 포함)
     notion_token = args.notion_token or os.environ.get("NOTION_TOKEN")
+    if not args.notion_db:
+        args.notion_db = os.environ.get("NOTION_DB")
 
     # --stats: 상태 파일 현황 출력
     if args.stats:
