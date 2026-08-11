@@ -581,7 +581,16 @@ def run_pipeline(args) -> int:
         _print_log_summary(Path(args.log))
         return 0
 
-    all_new.sort(key=lambda c: (c.book_title, c.added_date or ""))
+    # 정렬은 클리핑과 fingerprint 를 반드시 함께 해야 한다.
+    # all_new 만 정렬하면 all_new_fps 와 인덱스가 어긋나고,
+    # sync_to_notion(clip_fps=…) 이 둘을 위치로 zip 하므로 엉뚱한
+    # fingerprint 가 저장돼 dedup 이 통째로 깨진다.
+    _paired = sorted(
+        zip(all_new, all_new_fps),
+        key=lambda p: (p[0].book_title, p[0].added_date or ""),
+    )
+    all_new     = [c for c, _ in _paired]
+    all_new_fps = [fp for _, fp in _paired]
 
     # ── 5a. 파일 출력 (선택) ─────────────────────────────────────────────
     if args.output:

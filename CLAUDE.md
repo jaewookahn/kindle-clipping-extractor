@@ -175,8 +175,10 @@ fixture: `examples/gongsandangseoneon - *.sdr/` 실제 KFX 예제 사용.
   `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`)가
   import 직후 `load_dotenv()` 호출. `NOTION_TOKEN`·`NOTION_DB` 를 여기서 읽는다.
   우선순위: CLI 인자 > 셸 환경변수 > `.env`. 템플릿은 `.env.example`.
-- `notional` — Notion API 클라이언트
 - `tqdm` — 진행 표시
-- `requests` — Google Books API (표지 이미지)
+- `requests` — Notion REST API 호출 + 표지 이미지 조회.
+  Notion 클라이언트는 `kindle/notion_export.py` 의 `_NotionAPI` (429/5xx 백오프 재시도).
+  **`notional` 은 제거됨** — pydantic v1 (`pydantic.main.ModelMetaclass`) 에 고정돼
+  pydantic 2 환경에서 import 자체가 실패했다. 다시 추가하지 말 것.
 - `pypdf` — kfxlib이 일부 KFX 변형에서 요구. 없으면 `extract_kfx_info failed: No module named 'pypdf'` 경고와 함께 본문·KL 맵이 비게 됨.
 - Calibre + KFX Input 플러그인 — KFX 텍스트 추출 (선택, pip 외 별도 설치)

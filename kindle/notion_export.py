@@ -7,16 +7,15 @@ without double-counting.
 
 import hashlib
 import json
+import random
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import notional
-from notional.query import TextCondition
-from notional.types import Title, RichText, Number, Date, ExternalFile
-from notional.blocks import Paragraph
+import requests
 
 from kindle.models import Clipping
 
@@ -225,82 +224,165 @@ def _get_cover_url(title: str, author: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Notion REST client
+# ---------------------------------------------------------------------------
+#
+# notional 은 pydantic v1 (`from pydantic.main import ModelMetaclass`) 에 묶여
+# 있어 pydantic 2 가 깔린 환경에서는 import 조차 실패한다. 이 프로젝트가 쓰는
+# Notion 호출은 아래 6종뿐이라 requests 로 직접 부르고 의존성을 걷어냈다.
+#
+# Notion 은 integration 당 평균 3 req/s 로 제한하며 초과 시 429 + Retry-After
+# 를 준다. 책 한 권을 rewrite 하면 블록 삭제만 수백 건이라 재시도가 없으면
+# 중간에 그대로 실패한다 → _NotionAPI 가 429/5xx 를 백오프 재시도한다.
+
+_NOTION_API_VERSION = "2022-06-28"
+_NOTION_BASE = "https://api.notion.com/v1"
+
+
+class _NotionAPI:
+    """토큰 하나로 묶인 Notion REST 세션 (429/5xx 자동 재시도)."""
+
+    def __init__(self, token: str, max_retries: int = 5, timeout: int = 30) -> None:
+        if not token:
+            raise RuntimeError("Notion 토큰 누락 — NOTION_TOKEN 또는 --notion-token 확인")
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization":  f"Bearer {token}",
+            "Notion-Version": _NOTION_API_VERSION,
+            "Content-Type":   "application/json",
+        })
+
+    def request(self, method: str, path: str, **kwargs) -> requests.Response:
+        """path 는 '/pages/xxx' 처럼 _NOTION_BASE 이후 부분."""
+        url = f"{_NOTION_BASE}{path}"
+        delay = 1.0
+        for attempt in range(self._max_retries + 1):
+            r = self._session.request(method, url, timeout=self._timeout, **kwargs)
+            if r.status_code != 429 and r.status_code < 500:
+                return r
+            if attempt == self._max_retries:
+                return r
+            # 429 는 Retry-After(초) 를 신뢰하고, 5xx 는 지수 백오프 + 지터
+            if r.status_code == 429:
+                wait = float(r.headers.get("Retry-After", delay))
+            else:
+                wait = delay + random.uniform(0, 0.3)
+            time.sleep(min(wait, 30.0))
+            delay = min(delay * 2, 30.0)
+        return r   # 도달 불가 — 루프에서 반환됨
+
+    def get(self, path, **kw):    return self.request("GET", path, **kw)
+    def post(self, path, **kw):   return self.request("POST", path, **kw)
+    def patch(self, path, **kw):  return self.request("PATCH", path, **kw)
+    def delete(self, path, **kw): return self.request("DELETE", path, **kw)
+
+
+def _clean_id(raw: str) -> str:
+    return str(raw).replace("-", "")
+
+
+def _fail(r: requests.Response, what: str) -> None:
+    raise RuntimeError(f"{what} 실패 ({r.status_code}): {r.text[:300]}")
+
+
+# ---------------------------------------------------------------------------
 # Notion operations
 # ---------------------------------------------------------------------------
 
-def _find_existing_page(notion, database_id: str, title: str) -> Optional[str]:
+def _page_exists(api: _NotionAPI, page_id: str) -> bool:
+    """저장된 page_id 가 아직 살아 있는지 확인 (삭제된 페이지 감지)."""
+    try:
+        r = api.get(f"/pages/{_clean_id(page_id)}")
+    except Exception:
+        return False
+    if r.status_code >= 400:
+        return False
+    # 휴지통에 들어간 페이지는 200 이지만 archived/in_trash 가 True
+    try:
+        data = r.json()
+    except ValueError:
+        return False
+    return not (data.get("archived") or data.get("in_trash"))
+
+
+def _find_existing_page(api: _NotionAPI, database_id: str, title: str) -> Optional[str]:
     """Return page_id if a page with this exact title exists, else None."""
     try:
-        query = (
-            notion.databases.query(database_id)
-            .filter(property="Title", rich_text=TextCondition(equals=title))
-            .limit(1)
+        r = api.post(
+            f"/databases/{_clean_id(database_id)}/query",
+            json={
+                # Title 은 title 타입 속성 — rich_text 필터로는 매칭되지 않는다
+                "filter": {"property": "Title", "title": {"equals": title}},
+                "page_size": 1,
+            },
         )
-        data = query.first()
-        return str(data.id) if data else None
+        if r.status_code >= 400:
+            print(f"  [경고] 페이지 검색 실패 ({title}): "
+                  f"{r.status_code} {r.text[:120]}", file=sys.stderr)
+            return None
+        results = r.json().get("results", [])
+        return results[0]["id"] if results else None
     except Exception as e:
         print(f"  [경고] 페이지 검색 실패 ({title}): {e}", file=sys.stderr)
         return None
 
 
-def _create_page(notion, database_id: str, title: str, author: str,
-                 highlight_count: int, last_date: Optional[str],
-                 enable_book_cover: bool) -> str:
-    """Create a new Notion page and return its ID."""
-    props: dict = {
-        "Title":          Title[title],
-        "Author":         RichText[author],
-        "Highlights":     Number[highlight_count],
-        "Last Synced":    Date[datetime.now().isoformat()],
-    }
+def _build_properties(title: Optional[str] = None, author: Optional[str] = None,
+                      highlight_count: Optional[int] = None,
+                      last_date: Optional[str] = None,
+                      touch_synced: bool = True) -> dict:
+    """None 이 아닌 값만 담은 Notion properties payload."""
+    props: dict = {}
+    if title is not None:
+        props["Title"] = {"title": [{"type": "text", "text": {"content": title}}]}
+    if author is not None:
+        props["Author"] = {"rich_text": [{"type": "text", "text": {"content": author}}]}
+    if highlight_count is not None:
+        props["Highlights"] = {"number": highlight_count}
+    if touch_synced:
+        props["Last Synced"] = {"date": {"start": datetime.now().isoformat()}}
     if last_date:
         try:
             dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
-            props["Last Highlighted"] = Date[dt.isoformat()]
+            props["Last Highlighted"] = {"date": {"start": dt.isoformat()}}
         except ValueError:
+            # My Clippings.txt 는 로캘 문자열("Monday, January 1, 2024 …")이라
+            # 이 포맷으로 파싱되지 않는다 — 속성만 건너뛴다.
             pass
+    return props
 
-    page = notion.pages.create(
-        parent=notion.databases.retrieve(database_id),
-        properties=props,
-        children=[],
-    )
 
-    if enable_book_cover and page.cover is None:
+def _create_page(api: _NotionAPI, database_id: str, title: str, author: str,
+                 highlight_count: int, last_date: Optional[str],
+                 enable_book_cover: bool) -> str:
+    """Create a new Notion page and return its ID."""
+    payload: dict = {
+        "parent":     {"database_id": _clean_id(database_id)},
+        "properties": _build_properties(
+            title=title, author=author,
+            highlight_count=highlight_count, last_date=last_date,
+        ),
+        "children":   [],
+    }
+    if enable_book_cover:
         url = _get_cover_url(title, author) or NO_COVER_IMG
-        notion.pages.set(page, cover=ExternalFile[url])
+        payload["cover"] = {"type": "external", "external": {"url": url}}
         if url == NO_COVER_IMG:
             print(f"  × 표지를 찾을 수 없음 — 플레이스홀더 사용", flush=True)
         else:
             print(f"  ✓ 표지 추가 ({url[:60]}…)", flush=True)
 
-    return str(page.id)
+    r = api.post("/pages", json=payload)
+    if r.status_code >= 400:
+        _fail(r, "페이지 생성")
+    return r.json()["id"]
 
 
-_NOTION_API_VERSION = "2022-06-28"
-
-
-def _append_clippings(notion, page_id: str, formatted: List[str],
-                      notion_token: str = "") -> None:
-    """Append formatted clipping text as Paragraph blocks to an existing page.
-
-    notional 0.8.2 가 생성하는 block payload 에 Notion API 가 거부하는
-    read-only 필드(archived, has_children 등) 가 포함되어
-    "body.children[0].* should be not present" 오류가 난다.
-    따라서 paragraph block 추가는 raw HTTP API 로 직접 호출한다.
-    """
-    import requests
-    if not notion_token:
-        raise RuntimeError("Notion 토큰 누락 — _append_clippings 호출부 확인")
-
-    pid = str(page_id).replace("-", "")
-    headers = {
-        "Authorization":  f"Bearer {notion_token}",
-        "Notion-Version": _NOTION_API_VERSION,
-        "Content-Type":   "application/json",
-    }
-    url = f"https://api.notion.com/v1/blocks/{pid}/children"
-
+def _append_clippings(api: _NotionAPI, page_id: str, formatted: List[str]) -> None:
+    """Append formatted clipping text as Paragraph blocks to an existing page."""
+    pid = _clean_id(page_id)
     full_text = "".join(formatted)
     for chunk in _split_chunks(full_text):
         payload = {
@@ -315,41 +397,29 @@ def _append_clippings(notion, page_id: str, formatted: List[str],
                 },
             }],
         }
-        r = requests.patch(url, json=payload, headers=headers, timeout=30)
+        r = api.patch(f"/blocks/{pid}/children", json=payload)
         if r.status_code >= 400:
-            raise RuntimeError(
-                f"Notion blocks.children.append 실패 ({r.status_code}): {r.text}"
-            )
+            _fail(r, "blocks.children.append")
 
 
-def _rewrite_page_body(page_id: str, formatted: List[str],
-                       notion_token: str) -> None:
+def _rewrite_page_body(api: _NotionAPI, page_id: str, formatted: List[str]) -> None:
     """Delete all existing child blocks of a page, then re-append `formatted`.
 
     본문 전체를 새로 쓴다. 클리핑 텍스트 포맷이 바뀌었을 때(예: 챕터 정보
     추가) 기존 페이지를 갱신하는 용도. 표지·속성·page_id 는 보존된다.
     """
-    import requests
-    if not notion_token:
-        raise RuntimeError("Notion 토큰 누락 — _rewrite_page_body 호출부 확인")
-
-    pid = str(page_id).replace("-", "")
-    headers = {
-        "Authorization":  f"Bearer {notion_token}",
-        "Notion-Version": _NOTION_API_VERSION,
-        "Content-Type":   "application/json",
-    }
+    pid = _clean_id(page_id)
 
     # 1. 기존 자식 블록 ID 수집 (페이지네이션)
     block_ids: List[str] = []
     cursor = None
     while True:
-        url = f"https://api.notion.com/v1/blocks/{pid}/children?page_size=100"
+        path = f"/blocks/{pid}/children?page_size=100"
         if cursor:
-            url += f"&start_cursor={cursor}"
-        r = requests.get(url, headers=headers, timeout=30)
+            path += f"&start_cursor={cursor}"
+        r = api.get(path)
         if r.status_code >= 400:
-            raise RuntimeError(f"블록 조회 실패 ({r.status_code}): {r.text}")
+            _fail(r, "블록 조회")
         data = r.json()
         block_ids.extend(b["id"] for b in data.get("results", []))
         if not data.get("has_more"):
@@ -358,50 +428,25 @@ def _rewrite_page_body(page_id: str, formatted: List[str],
 
     # 2. 전부 삭제
     for bid in block_ids:
-        bid_clean = bid.replace("-", "")
-        dr = requests.delete(
-            f"https://api.notion.com/v1/blocks/{bid_clean}",
-            headers=headers, timeout=30,
-        )
+        dr = api.delete(f"/blocks/{_clean_id(bid)}")
         if dr.status_code >= 400:
-            raise RuntimeError(f"블록 삭제 실패 ({dr.status_code}): {dr.text}")
+            _fail(dr, "블록 삭제")
 
     # 3. 새 본문 추가
-    _append_clippings(None, page_id, formatted, notion_token=notion_token)
+    _append_clippings(api, page_id, formatted)
 
 
-def _update_page_properties(page_id: str, highlight_count: Optional[int],
-                             last_date: Optional[str], notion_token: str) -> None:
+def _update_page_properties(api: _NotionAPI, page_id: str,
+                            highlight_count: Optional[int],
+                            last_date: Optional[str]) -> None:
     """Notion 페이지 속성 업데이트.
 
     highlight_count=None 이면 Highlights 를 갱신하지 않는다.
     증분 sync 에서 새 클리핑만 세면 기존 카운트를 잘못 덮어쓰므로, 전체
     클리핑 수를 아는 경우(페이지 신규 생성 / rewrite)에만 None 이 아닌 값을 전달.
     """
-    import requests
-    props: dict = {
-        "Last Synced": {"date": {"start": datetime.now().isoformat()}},
-    }
-    if highlight_count is not None:
-        props["Highlights"] = {"number": highlight_count}
-    if last_date:
-        try:
-            dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
-            props["Last Highlighted"] = {"date": {"start": dt.isoformat()}}
-        except ValueError:
-            pass
-    pid = str(page_id).replace("-", "")
-    headers = {
-        "Authorization":  f"Bearer {notion_token}",
-        "Notion-Version": _NOTION_API_VERSION,
-        "Content-Type":   "application/json",
-    }
-    r = requests.patch(
-        f"https://api.notion.com/v1/pages/{pid}",
-        json={"properties": props},
-        headers=headers,
-        timeout=30,
-    )
+    props = _build_properties(highlight_count=highlight_count, last_date=last_date)
+    r = api.patch(f"/pages/{_clean_id(page_id)}", json={"properties": props})
     if r.status_code >= 400:
         print(f"  [경고] 페이지 속성 업데이트 실패 ({r.status_code}): {r.text[:120]}",
               file=sys.stderr)
@@ -434,7 +479,7 @@ def sync_to_notion(
     Returns:
         {"added": int, "skipped": int, "books_new": int, "books_updated": int}
     """
-    notion = notional.connect(auth=notion_token)
+    api = _NotionAPI(notion_token)
     state = load_state(state_path)
     books_state: Dict[str, dict] = state.setdefault("books", {})
 
@@ -446,6 +491,15 @@ def sync_to_notion(
     # clip_fps: sync_kfx.py가 PRE-KL 시점에 미리 계산한 fingerprint 목록.
     # 제공되면 synced_fingerprints도 PRE-KL 기준으로 기록돼 seen_keys와 동일 공간 사용.
     # None이면 (My Clippings 등) clipping 객체에서 직접 계산.
+    #
+    # clippings[i] ↔ clip_fps[i] 위치 대응이 전제다. 호출부에서 clippings 만
+    # 정렬하면 짝이 어긋나 잘못된 fingerprint 가 저장되고 dedup 이 깨지므로,
+    # 길이가 다르면 조용히 zip 으로 자르지 말고 즉시 알린다.
+    if clip_fps is not None and len(clip_fps) != len(clippings):
+        raise ValueError(
+            f"clip_fps 길이 불일치: clippings={len(clippings)}, clip_fps={len(clip_fps)} "
+            "— 두 리스트는 같은 순서로 유지돼야 한다 (함께 정렬할 것)"
+        )
     _fp_map: Optional[Dict[int, str]] = (
         {id(c): fp for c, fp in zip(clippings, clip_fps)} if clip_fps else None
     )
@@ -501,36 +555,33 @@ def sync_to_notion(
         page_id = book_state.get("notion_page_id")
 
         # Verify the stored page_id still exists
-        if page_id:
-            try:
-                notion.pages.retrieve(page_id)
-            except Exception:
-                page_id = None
-                book_state["notion_page_id"] = None
+        if page_id and not _page_exists(api, page_id):
+            page_id = None
+            book_state["notion_page_id"] = None
 
         if page_id is None:
             # Try to find an existing page by title before creating
-            page_id = _find_existing_page(notion, database_id, title)
+            page_id = _find_existing_page(api, database_id, title)
 
         if page_id is None:
             page_id = _create_page(
-                notion, database_id, title, author,
+                api, database_id, title, author,
                 len([c for c in book_clips if c.clip_type == "highlight"]),
                 last_date, enable_book_cover,
             )
             book_state["notion_page_id"] = page_id
-            _append_clippings(notion, page_id, formatted, notion_token=notion_token)
+            _append_clippings(api, page_id, formatted)
             summary["books_new"] += 1
             print(f"  ✓ 새 페이지 생성", flush=True)
         elif rewrite:
-            _rewrite_page_body(page_id, formatted, notion_token=notion_token)
-            _update_page_properties(page_id, highlight_count_for_props, last_date, notion_token)
+            _rewrite_page_body(api, page_id, formatted)
+            _update_page_properties(api, page_id, highlight_count_for_props, last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
             print(f"  ↻ 본문 재작성", flush=True)
         else:
-            _append_clippings(notion, page_id, formatted, notion_token=notion_token)
-            _update_page_properties(page_id, highlight_count_for_props, last_date, notion_token)
+            _append_clippings(api, page_id, formatted)
+            _update_page_properties(api, page_id, highlight_count_for_props, last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
 

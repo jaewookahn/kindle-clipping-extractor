@@ -1,8 +1,8 @@
 # 런타임 의존성
 python-dotenv>=1.0       # .env 파일 로드 (NOTION_TOKEN, NOTION_DB 등)
-notional>=0.8.2         # Notion API 클라이언트 (sync_kfx --notion-db, sync_clippings_to_notion)
 tqdm>=4.67              # 진행 표시 바
-requests>=2.33          # Google Books API 표지 이미지 조회 (notion_export.py)
+requests>=2.33          # Notion REST API + 표지 이미지 조회 (notion_export.py)
+                        # notional 은 pydantic v1 고정이라 제거됨 — REST 직접 호출
 pypdf>=6.0              # kfxlib이 일부 KFX 변형에서 요구. 없으면 본문·KL 맵 추출 실패.
 textual>=0.80           # TUI (tui.py). 미설치 시 CLI만 동작, TUI 진입점만 실패.
 textual-image[textual]>=0.13   # TUI 표지 이미지 (Half-block Unicode/iTerm/Kitty 자동 선택)
