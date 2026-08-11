@@ -287,7 +287,68 @@ python sync_kfx.py --notion-db $NOTION_DB
 --no-progress           tqdm 진행 바 끄고 책당 1줄 print (TUI·로그 캡처용)
 --kindle PATH           킨들 마운트 경로 직접 지정 (생략 시 자동 감지)
 --log FILE              로그 파일 경로 (기본값: kindle_sync.log)
+--no-chapter-outline    클리핑 앞 챕터 목차를 넣지 않음 (아래 참고)
 ```
+
+---
+
+## 챕터 목차 (챕터별 페이지 범위)
+
+> **상태: 실험적.** 없어도 나머지 파이프라인은 그대로 동작합니다.
+> 제거 방법은 이 절 마지막을 참고하세요.
+
+KFX 내장 목차(TOC)는 각 챕터의 **시작 위치**만 알려줍니다. 이걸 확장해
+챕터마다 **페이지·Kindle Location 범위**를 계산하고, 클리핑 **앞**에 목차로 남깁니다.
+나중에 하이라이트를 정리할 때 "이건 몇 장 얘기였나"를 되짚는 근거가 됩니다.
+
+```
+【목차 — 챕터별 범위】
+일러두기  ·  p.2–5 · Loc 2–43
+제1장 공산당선언  ·  p.12–62 · Loc 110–760
+  1. 부르주아와 프롤레타리아  ·  p.13–32 · Loc 113–358
+  3. 사회주의와 공산주의 문헌  ·  p.45–60 · Loc 532–729
+    (1) 반동적 사회주의  ·  p.45–54 · Loc 534–649
+```
+
+출력되는 곳 (모두 클리핑 앞):
+
+| 대상 | 형태 |
+|---|---|
+| Notion 본문 | 위와 같은 들여쓰기 목차 |
+| JSON (`-f json`) | 책 dict 의 `"chapters"` 키 (`clippings` 앞) |
+| Markdown (`-f markdown`) | `<details>` 접이식 목차 |
+
+**Notion 주의**: Notion API 의 블록 추가는 **끝에만** 붙습니다. 따라서 목차는
+페이지를 **새로 만들 때**와 **`--rewrite-bodies`** 때만 반영됩니다.
+이미 있는 페이지에 넣으려면:
+
+```bash
+python sync_kfx.py --notion-db $NOTION_DB --book "책이름" --rewrite-bodies
+```
+
+### 챕터 끝을 정하는 규칙
+
+KFX 는 부모 챕터와 그 첫 자식이 **같은 char offset** 을 가리키는 경우가 많습니다.
+그래서 "다음 목차 항목까지"로 단순히 자르면 부모 챕터의 범위가 길이 0 이 됩니다.
+
+> 챕터 끝 = **다음에 오는, 자기 자손이 아닌 목차 항목의 시작**
+
+끝 페이지도 exclusive 경계가 아니라 **마지막 문자**로 조회합니다. 그러지 않으면
+다음 챕터의 첫 페이지를 물고 들어갑니다.
+
+### 구성 요소 (제거할 경우 여기만 보면 됨)
+
+- `kindle/models.py` — `Chapter` 데이터클래스
+- `kindle/ebook.py` — `build_chapter_ranges()` 와 헬퍼(`_page_label_at`, `_kl_at`, `_is_descendant`)
+- `kindle/notion_export.py` — `format_chapter_outline()`, `format_chapter_range()`,
+  `sync_to_notion(chapters_by_book=…)`
+- `kindle/exporters.py` — `_chapter_dicts()`, `_chapter_outline_md()`,
+  `sync_export_json_grouped/markdown(chapters_by_book=…)`
+- `sync_kfx.py` — `chapters_by_book` 수집, `--no-chapter-outline`
+- `tests/test_chapter_ranges.py`
+
+클리핑 개별에 챕터 이름을 붙이는 `fill_clipping_chapters()` 는 **이 기능과 별개로**
+원래 있던 것이라 함께 지우면 안 됩니다.
 
 ---
 
