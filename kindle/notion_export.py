@@ -96,7 +96,7 @@ def _split_chunks(text: str, max_len: int = 2000) -> List[str]:
     chunks: List[str] = []
     while len(text) > max_len:
         cut = text.rfind("\n", 0, max_len)
-        if cut == -1:
+        if cut <= 0:          # rfind 실패(-1) 또는 첫 문자가 \n(0) → 강제 분할
             cut = max_len
         chunks.append(text[:cut])
         text = text[cut:]
@@ -370,17 +370,41 @@ def _rewrite_page_body(page_id: str, formatted: List[str],
     _append_clippings(None, page_id, formatted, notion_token=notion_token)
 
 
-def _update_page_properties(notion, page_id: str, highlight_count: int,
-                             last_date: Optional[str]) -> None:
-    page = notion.pages.retrieve(page_id)
-    page["Highlights"] = Number[highlight_count]
-    page["Last Synced"] = Date[datetime.now().isoformat()]
+def _update_page_properties(page_id: str, highlight_count: Optional[int],
+                             last_date: Optional[str], notion_token: str) -> None:
+    """Notion 페이지 속성 업데이트.
+
+    highlight_count=None 이면 Highlights 를 갱신하지 않는다.
+    증분 sync 에서 새 클리핑만 세면 기존 카운트를 잘못 덮어쓰므로, 전체
+    클리핑 수를 아는 경우(페이지 신규 생성 / rewrite)에만 None 이 아닌 값을 전달.
+    """
+    import requests
+    props: dict = {
+        "Last Synced": {"date": {"start": datetime.now().isoformat()}},
+    }
+    if highlight_count is not None:
+        props["Highlights"] = {"number": highlight_count}
     if last_date:
         try:
             dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
-            page["Last Highlighted"] = Date[dt.isoformat()]
+            props["Last Highlighted"] = {"date": {"start": dt.isoformat()}}
         except ValueError:
             pass
+    pid = str(page_id).replace("-", "")
+    headers = {
+        "Authorization":  f"Bearer {notion_token}",
+        "Notion-Version": _NOTION_API_VERSION,
+        "Content-Type":   "application/json",
+    }
+    r = requests.patch(
+        f"https://api.notion.com/v1/pages/{pid}",
+        json={"properties": props},
+        headers=headers,
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        print(f"  [경고] 페이지 속성 업데이트 실패 ({r.status_code}): {r.text[:120]}",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +418,7 @@ def sync_to_notion(
     state_path: Path = DEFAULT_STATE,
     enable_book_cover: bool = True,
     rewrite: bool = False,
+    clip_fps: Optional[List[str]] = None,
 ) -> dict:
     """Sync clippings to a Notion database.
 
@@ -418,6 +443,16 @@ def sync_to_notion(
     for c in clippings:
         by_book.setdefault(c.book_title, []).append(c)
 
+    # clip_fps: sync_kfx.py가 PRE-KL 시점에 미리 계산한 fingerprint 목록.
+    # 제공되면 synced_fingerprints도 PRE-KL 기준으로 기록돼 seen_keys와 동일 공간 사용.
+    # None이면 (My Clippings 등) clipping 객체에서 직접 계산.
+    _fp_map: Optional[Dict[int, str]] = (
+        {id(c): fp for c, fp in zip(clippings, clip_fps)} if clip_fps else None
+    )
+
+    def _clip_fp(c: Clipping) -> str:
+        return _fp_map[id(c)] if _fp_map else fingerprint(c)
+
     summary = {"added": 0, "skipped": 0, "books_new": 0, "books_updated": 0}
 
     for title, book_clips in by_book.items():
@@ -430,7 +465,7 @@ def sync_to_notion(
         if rewrite:
             new_clips = list(book_clips)   # 전체 재작성 — dedup 무시
         else:
-            new_clips = [c for c in book_clips if fingerprint(c) not in synced_fps]
+            new_clips = [c for c in book_clips if _clip_fp(c) not in synced_fps]
         summary["skipped"] += len(book_clips) - len(new_clips)
 
         if not new_clips:
@@ -441,15 +476,20 @@ def sync_to_notion(
         if not content_clips:
             # Still record fingerprints so bookmarks don't re-appear
             for c in new_clips:
-                synced_fps.add(fingerprint(c))
+                synced_fps.add(_clip_fp(c))
             book_state["synced_fingerprints"] = sorted(synced_fps)
             continue
 
         author = next((c.author for c in book_clips if c.author), "")
-        all_highlights = [c for c in book_clips if c.clip_type == "highlight"]
         last_date = max(
             (c.added_date for c in book_clips if c.added_date),
             default=None,
+        )
+        # rewrite 시 book_clips = 전체 클리핑 → 총 하이라이트 수 정확.
+        # 증분 sync 시 book_clips = 새 클리핑만 → 전체 수 알 수 없으므로 None 전달.
+        highlight_count_for_props = (
+            len([c for c in book_clips if c.clip_type == "highlight"])
+            if rewrite else None
         )
 
         formatted = [_format_clipping(c) for c in content_clips]
@@ -475,7 +515,8 @@ def sync_to_notion(
         if page_id is None:
             page_id = _create_page(
                 notion, database_id, title, author,
-                len(all_highlights), last_date, enable_book_cover,
+                len([c for c in book_clips if c.clip_type == "highlight"]),
+                last_date, enable_book_cover,
             )
             book_state["notion_page_id"] = page_id
             _append_clippings(notion, page_id, formatted, notion_token=notion_token)
@@ -483,22 +524,22 @@ def sync_to_notion(
             print(f"  ✓ 새 페이지 생성", flush=True)
         elif rewrite:
             _rewrite_page_body(page_id, formatted, notion_token=notion_token)
-            _update_page_properties(notion, page_id, len(all_highlights), last_date)
+            _update_page_properties(page_id, highlight_count_for_props, last_date, notion_token)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
             print(f"  ↻ 본문 재작성", flush=True)
         else:
             _append_clippings(notion, page_id, formatted, notion_token=notion_token)
-            _update_page_properties(notion, page_id, len(all_highlights), last_date)
+            _update_page_properties(page_id, highlight_count_for_props, last_date, notion_token)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
 
         for c in new_clips:
-            synced_fps.add(fingerprint(c))
+            synced_fps.add(_clip_fp(c))
         book_state["synced_fingerprints"] = sorted(synced_fps)
-        summary["added"] += len(new_clips)
+        summary["added"] += len(content_clips)   # bookmark는 Notion에 추가되지 않으므로 제외
         verb = "재작성" if rewrite else "추가"
-        print(f"  → {len(new_clips)}개 {verb} (skip {len(book_clips) - len(new_clips)})\n", flush=True)
+        print(f"  → {len(content_clips)}개 {verb} (skip {len(book_clips) - len(new_clips)})\n", flush=True)
         save_state(state_path, state)   # 책마다 중간 저장 → 중단돼도 진전분 보존
 
     save_state(state_path, state)

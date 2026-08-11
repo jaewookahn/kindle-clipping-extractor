@@ -618,6 +618,7 @@ def run_pipeline(args) -> int:
             state_path=Path(args.notion_state),
             enable_book_cover=not args.no_cover,
             rewrite=args.rewrite_bodies,
+            clip_fps=all_new_fps,   # PRE-KL fingerprint 전달 → synced_fingerprints도 PRE-KL 기준
         )
         print(
             f"Notion 완료: 추가 {result['added']}개 / skip {result['skipped']}개"
