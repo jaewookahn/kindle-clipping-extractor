@@ -171,6 +171,10 @@ fixture: `examples/gongsandangseoneon - *.sdr/` 실제 KFX 예제 사용.
 
 `pip install -r requirements.txt` — 런타임/테스트 의존성 모두 포함.
 
+- `python-dotenv` — `.env` 로드. 진입점 5개(`sync_kfx`, `tui`,
+  `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`)가
+  import 직후 `load_dotenv()` 호출. `NOTION_TOKEN`·`NOTION_DB` 를 여기서 읽는다.
+  우선순위: CLI 인자 > 셸 환경변수 > `.env`. 템플릿은 `.env.example`.
 - `notional` — Notion API 클라이언트
 - `tqdm` — 진행 표시
 - `requests` — Google Books API (표지 이미지)

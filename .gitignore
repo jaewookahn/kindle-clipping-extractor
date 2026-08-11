@@ -15,6 +15,11 @@ venv/
 outputs/
 logs/
 
+# 클리핑 내보내기 결과 (md)
+# README.md·CLAUDE.md 는 추적해야 하므로 *.md 대신 개별 지정.
+# 새 내보내기는 outputs/ 로 저장하면 자동 제외됨.
+gotong-final.md
+
 # macOS
 .DS_Store
 

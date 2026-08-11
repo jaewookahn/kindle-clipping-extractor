@@ -194,17 +194,25 @@ https://www.notion.so/<workspace>/<dbname>-1a2b3c4d5e6f7890abcdef1234567890?v=..
 
 ### 3. 환경변수 등록
 
-```bash
-# 한 번만
-export NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxx
-export NOTION_DB=1a2b3c4d5e6f7890abcdef1234567890
+**권장 — `.env` 파일** (모든 스크립트가 자동 로드, `.gitignore` 처리됨)
 
-# 영구 — ~/.zshrc 또는 ~/.bashrc 에 추가
-echo 'export NOTION_TOKEN=ntn_xxx' >> ~/.zshrc
-echo 'export NOTION_DB=1a2b3c4d...' >> ~/.zshrc
+```bash
+cp .env.example .env
+# 편집기로 NOTION_TOKEN, NOTION_DB 채우기
 ```
 
-두 변수가 잡히면 TUI 의 동기화 모달이 "Notion 업로드" 를 자동 ON 으로 시작.
+`.env` 가 있으면 `sync_kfx.py`, `tui.py`, `sync_clippings_to_notion.py`,
+`notion_create_db.py`, `notion_refresh_covers.py` 가 실행 시 자동으로 읽는다.
+CLI 인자(`--notion-token`, `--notion-db`)를 주면 그쪽이 우선.
+
+**대안 — 셸 환경변수**
+
+```bash
+export NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxx
+export NOTION_DB=1a2b3c4d5e6f7890abcdef1234567890
+```
+
+두 값이 잡히면 TUI 의 동기화 모달이 "Notion 업로드" 를 자동 ON 으로 시작.
 
 ### 자주 막히는 곳
 
