@@ -326,3 +326,87 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q -p no:warnings
   pydantic 2 환경에서 import 자체가 실패했다. 다시 추가하지 말 것.
 - `pypdf` — kfxlib이 일부 KFX 변형에서 요구. 없으면 `extract_kfx_info failed: No module named 'pypdf'` 경고와 함께 본문·KL 맵이 비게 됨.
 - Calibre + KFX Input 플러그인 — KFX 텍스트 추출 (선택, pip 외 별도 설치)
+
+---
+
+## 자매 프로젝트 — 종이책 클리핑 통합
+
+`~/prj/highlight-capture` (**줄줄이**, React Native) — 종이책을 카메라로 찍어 OCR로
+하이라이트를 뽑아 Notion에 저장하는 앱. 이 프로젝트와 **하나의 Notion DB로 통합하는 계획**이
+진행 중이다.
+
+→ 설계 문서: `~/prj/highlight-capture/CLIPPING_INTEGRATION_PLAN.md`
+  (브랜치 `docs/clipping-integration-plan`. 다른 저장소에 있으니 통합 작업 전에 반드시 읽을 것)
+
+### 통합 시 이 저장소가 받는 변경 (미착수)
+
+| 현재 | 통합 후 |
+|---|---|
+| `fingerprint()` = SHA-1(`title\|type\|location_start\|location_end`) | **`clip_key`** — 본문 20자 이상이면 **내용만** 해시, 미만이면 Location 혼합 |
+| Notion DB 5속성 (Title/Author/Highlights/Last Highlighted/Last Synced) | `Book Key`·`Sources`·`Devices`·ISBN/ASIN·Publisher 등 추가 |
+| 클리핑 = `paragraph` 1개 (본문 + `* 메타` 한 덩어리) | `divider` → 회색 `paragraph`(메타) → `quote`(본문) — 줄줄이 포맷으로 통일 |
+| 목차 = `format_chapter_outline()` 텍스트 블록 | 사람용 텍스트 + `code(json)` `clippings_toc` 병기 |
+| `APNXInfo.asin` / `page_count` 미활용 | Book 메타로 반영 (ASIN은 종이책 ISBN과 잇는 별칭 키) |
+
+### ⚠️ 통합을 막고 있는 것 — `source_file` 이 지워진다
+
+`kindle/exporters.py` 의 `sync_export_json_grouped()` 가 `strip = ("book_title", "author",
+"source_file")` 로 **`source_file` 을 제거**한다. 그 결과 내보낸 JSON에 **기기를 식별할
+근거가 전혀 없다.**
+
+이것이 막고 있는 것:
+- **삭제 탐지**. `My Clippings.txt` 에는 있는데 같은 기기의 YJR 현재 상태에 없으면 삭제된
+  것이지만, 기기를 구분하지 못하면 *다른 기기에서 읽은 멀쩡한 클리핑*을 삭제로 오판한다
+- 통합 DB의 `Devices` 속성
+
+→ 통합 Phase 4에서 `source_file` 을 strip 목록에서 빼거나 `device` 필드를 신설해야 한다.
+   **그 전까지 삭제 탐지를 구현하면 안 된다.**
+
+### My Clippings.txt 는 현재 상태가 아니라 편집 이력 로그다
+
+킨들은 이 파일에 **append만 한다.** 하이라이트를 수정·삭제해도 이전 엔트리가 그대로 남는다.
+실측 (8,421 엔트리 / 106권):
+
+```
+완전 동일 중복          237건
+Location 구간 겹침    1,032쌍  (시작 Loc 동일 464 → 그중 내용 포함관계 336)
+클리핑 한도 절단        988건 (11.7%)
+```
+
+실제 사례 — 하이라이트 핸들을 끌 때마다 초 단위로 쌓인다:
+
+```
+[남아 있는 나날] Loc452-453   7:43:40 (75자) → 7:43:53 (78자) → 7:44:00 (75자)
+```
+
+**최종본이 항상 더 길지 않다** (75→78→**75**). 따라서 승계 판정의 승자는 "가장 긴 것"이
+아니라 **`added_date` 가 가장 늦은 것**이다. 사용자가 마지막에 남긴 의도가 정답.
+
+권위 순서: **KFX+YJR(현재 상태) > My Clippings 최신 > 이전 버전(`superseded_by` 표시)**.
+승계로 밀려난 항목도 **삭제하지 않는다** — 판정이 휴리스틱이라 되돌릴 수 있어야 한다.
+
+한도 절단 988건은 `recover_clippings.py` 복구를 **ingest 선행 단계로 강제**한다.
+복구 전에 키를 만들면 같은 하이라이트가 절단본/복구본 두 개로 갈린다.
+
+### ⚠️ 클리핑 데이터를 분석할 때의 함정
+
+**짧은 클리핑이 대량이다** — 기기별로 전체의 12~25%가 2자 이하다
+(기기A 480/1,951 = 24.6%, 기기B 656/5,638 = 11.6%). "그", "L" 같은 오터치.
+
+내용 해시로 중복을 판정하면 이들이 전부 한 덩어리로 뭉개져 **잘못된 결론이 나온다.**
+실제로 통합 계획 1판이 이 함정 때문에 *"기기 간 Location이 다르다"* 고 오판했다 —
+근거로 든 3건이 전부 1글자 클리핑의 우연한 충돌이었다.
+
+→ 클리핑을 비교·집계할 때는 **정규화 후 20자 이상만** 대상으로 삼고, 표본 수를 함께 확인할 것.
+
+### 좌표에 대한 현재 이해
+
+- **Location** — 책 파일 구조에서 파생. 같은 판본이면 기기 무관 안정적. 킨들 내부 중복 제거의 1차 좌표
+- **page** — KFX 플러그인/APNX가 만든 **추정값**. 2차 신호로만 사용
+- **종이책과는 공통 좌표가 없다.** 인쇄 페이지 ≠ 킨들 추정 페이지(판본이 다름).
+  종이책↔킨들 연결은 좌표가 아니라 **본문 내용**으로 한다
+
+미확증: 기기 간 좌표 일치 여부. 두 기기가 서로 다른 책·구간을 읽어 **의미 있는 중복이 0개**라
+데이터로 검증할 수 없었다. 간접 증거(공통 8권의 loc/page 비율이 대부분 5~10% 이내 일치)는
+일관성을 지지한다. 통합 Phase 1에 직접 실험(같은 책 같은 문장을 두 기기에서 하이라이트 →
+좌표 비교)이 잡혀 있다.
