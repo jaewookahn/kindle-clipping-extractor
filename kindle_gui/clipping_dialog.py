@@ -26,6 +26,10 @@ from kindle_gui.widgets import SortItem
 from kindle_gui.workers import run_in_background
 
 _COLUMNS = ["#", "타입", "색", "페이지", "위치", "날짜", "챕터", "내용"]
+_CONTENT_COL = 7
+# 내용 컬럼(7)은 Stretch 라 여기 없다 — 나머지만 고정 폭
+_COL_WIDTHS = {0: 52, 1: 44, 2: 52, 3: 56, 4: 84, 5: 116, 6: 150}
+_COVER_W = 200
 
 # YJR 이 content 앞에 "[yellow] ..." 같은 prefix 를 붙인다. 분리해서 색 컬럼으로.
 _COLOR_RE = re.compile(r"^\[([a-zA-Z]+)\]\s*(.*)", flags=re.DOTALL)
@@ -76,14 +80,6 @@ class ClippingDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        header = QLabel(
-            f"<b>{self.book.get('title', self.book['stem'])}</b>  "
-            f"{self.book.get('author', '')}  "
-            f"({self.book['yjr_count']} YJR / {self.book['stem']})",
-            self,
-        )
-        layout.addWidget(header)
-
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("🔍  검색 — 내용·챕터·색·타입")
         self.search_input.textChanged.connect(self._on_search_changed)
@@ -91,17 +87,27 @@ class ClippingDialog(QDialog):
 
         body = QHBoxLayout()
 
-        # 표지 패널
+        # 표지 패널 — 고정 폭, 위쪽 정렬. 나머지 폭은 전부 테이블이 가져간다.
         cover_col = QVBoxLayout()
         self.cover_label = QLabel("표지 로드 중…", self)
-        self.cover_label.setFixedWidth(220)
+        self.cover_label.setFixedWidth(_COVER_W)
         self.cover_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.cover_label.setWordWrap(True)
         self.cover_caption = QLabel("", self)
-        self.cover_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cover_caption.setStyleSheet("color: gray;")
+        self.cover_caption.setFixedWidth(_COVER_W)
+        self.cover_caption.setWordWrap(True)
+        self.cover_caption.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.cover_caption.setStyleSheet("color: gray; font-size: 11px;")
         cover_col.addWidget(self.cover_label)
         cover_col.addWidget(self.cover_caption)
+
+        self.info_label = QLabel("", self)
+        self.info_label.setFixedWidth(_COVER_W)
+        self.info_label.setWordWrap(True)
+        self.info_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.info_label.setStyleSheet("color: gray; font-size: 11px;")
+        cover_col.addSpacing(8)
+        cover_col.addWidget(self.info_label)
         cover_col.addStretch(1)
         body.addLayout(cover_col)
 
@@ -111,16 +117,30 @@ class ClippingDialog(QDialog):
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setSortingEnabled(True)
         table.setWordWrap(True)
-        table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        table.setAlternatingRowColors(True)
+
+        header = table.horizontalHeader()
+        for col, width in _COL_WIDTHS.items():
+            table.setColumnWidth(col, width)
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        # 내용 컬럼이 남는 폭을 전부 차지 → 가로 스크롤 없이 본문이 접힌다
+        header.setSectionResizeMode(_CONTENT_COL, QHeaderView.ResizeMode.Stretch)
+        # 정렬하면 행 순서가 바뀌는데 행 높이는 위치에 남아 있어 내용과 어긋난다.
+        # 정렬 직후 높이를 다시 계산해 준다.
+        header.sortIndicatorChanged.connect(lambda *_: table.resizeRowsToContents())
+        table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+
         self.table = table
         body.addWidget(table, stretch=1)
 
         layout.addLayout(body, stretch=1)
 
         close_row = QHBoxLayout()
-        close_row.addStretch(1)
+        self.warn_label = QLabel("", self)
+        self.warn_label.setStyleSheet("color: #b8860b;")
+        self.warn_label.setWordWrap(True)
+        close_row.addWidget(self.warn_label, stretch=1)
         close_btn = QPushButton("닫기", self)
         close_btn.clicked.connect(self.accept)
         close_row.addWidget(close_btn)
@@ -145,11 +165,20 @@ class ClippingDialog(QDialog):
         if path:
             pix = QPixmap(str(path))
             if not pix.isNull():
-                self.cover_label.setPixmap(
-                    pix.scaledToWidth(200, Qt.TransformationMode.SmoothTransformation)
+                scaled = pix.scaledToWidth(
+                    _COVER_W, Qt.TransformationMode.SmoothTransformation
                 )
+                # wordWrap 이 켜진 QLabel 은 minimumSizeHint 높이가 0 이라,
+                # 아래 addStretch 가 세로 공간을 전부 가져가면서 레이블이
+                # 0 높이로 찌그러진다 (pixmap 은 멀쩡한데 화면에선 안 보임).
+                # 이미지를 넣을 때는 워드랩을 끄고 높이를 고정한다.
+                self.cover_label.setWordWrap(False)
+                self.cover_label.setPixmap(scaled)
+                self.cover_label.setFixedHeight(scaled.height())
                 self.cover_caption.setText(caption)
                 return
+        self.cover_label.setWordWrap(True)
+        self.cover_label.setMinimumHeight(40)
         self.cover_label.setText(caption)
 
     # -- 테이블 --------------------------------------------------------------
@@ -169,19 +198,19 @@ class ClippingDialog(QDialog):
 
     def _redraw_table(self) -> None:
         table = self.table
+        # 채우는 동안 정렬을 꺼둔다. 켜둔 채로 넣으면 행이 삽입될 때마다
+        # 재정렬돼 인덱스가 밀리고 행 높이가 내용과 어긋난다.
         table.setSortingEnabled(False)
+        self._update_side_info()
 
         if not self.clips:
             table.setRowCount(1)
             msg = " / ".join(self.errors) if self.errors else "(클리핑 없음)"
-            table.setItem(0, 7, SortItem(msg, 0))
-            for col in range(7):
+            table.setItem(0, _CONTENT_COL, SortItem(msg, 0))
+            for col in range(_CONTENT_COL):
                 table.setItem(0, col, SortItem("-", 0))
-            table.setSortingEnabled(True)
+            table.resizeRowsToContents()
             return
-
-        if self.errors and "⚠" not in self.windowTitle():
-            self.setWindowTitle(self.windowTitle() + f"  ⚠ {len(self.errors)}건 경고")
 
         clips = self._filtered_clips()
         table.setRowCount(len(clips))
@@ -210,11 +239,45 @@ class ClippingDialog(QDialog):
             table.setItem(i, 3, SortItem(page_text, page))
             table.setItem(i, 4, SortItem(loc, c.location_start if c.location_start is not None else 0))
             table.setItem(i, 5, SortItem(date_text, c.added_date or ""))
-            table.setItem(i, 6, SortItem(c.chapter or "-", c.chapter or ""))
-            table.setItem(i, 7, SortItem(shown, 0))
+
+            chapter_item = SortItem(c.chapter or "-", c.chapter or "")
+            if c.chapter:
+                chapter_item.setToolTip(c.chapter)
+            table.setItem(i, 6, chapter_item)
+
+            content_item = SortItem(shown, shown)
+            content_item.setToolTip(shown)
+            table.setItem(i, _CONTENT_COL, content_item)
 
         table.setSortingEnabled(True)
         table.resizeRowsToContents()
+
+    def _update_side_info(self) -> None:
+        """표지 아래 책 정보 + 하단 경고줄 갱신."""
+        title = self.book.get("title", self.book["stem"])
+        author = self.book.get("author", "")
+        shown = len(self._filtered_clips())
+        total = len(self.clips)
+        counts: dict[str, int] = {}
+        for c in self.clips:
+            counts[c.clip_type] = counts.get(c.clip_type, 0) + 1
+        breakdown = "  ".join(
+            f"{_TYPE_ICON.get(k, k)} {v}" for k, v in sorted(counts.items())
+        )
+        lines = [f"<b>{title}</b>"]
+        if author:
+            lines.append(author)
+        lines.append("")
+        lines.append(f"클리핑 {shown}/{total}" if shown != total else f"클리핑 {total}")
+        if breakdown:
+            lines.append(breakdown)
+        lines.append(f"<span style='color:#999'>{self.book['stem']}</span>")
+        self.info_label.setText("<br>".join(lines))
+
+        if self.errors:
+            self.warn_label.setText("⚠  " + "  /  ".join(self.errors))
+        else:
+            self.warn_label.setText("")
 
     def _on_search_changed(self, text: str) -> None:
         self.search_text = text
