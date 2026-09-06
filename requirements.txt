@@ -6,6 +6,8 @@ requests>=2.33          # Notion REST API + 표지 이미지 조회 (notion_expo
 pypdf>=6.0              # kfxlib이 일부 KFX 변형에서 요구. 없으면 본문·KL 맵 추출 실패.
 textual>=0.80           # TUI (tui.py). 미설치 시 CLI만 동작, TUI 진입점만 실패.
 textual-image[textual]>=0.13   # TUI 표지 이미지 (Half-block Unicode/iTerm/Kitty 자동 선택)
+PyQt6>=6.11             # 맥 GUI 앱 (gui.py). GPL — 배포 시 라이선스 확인.
+                        # 미설치 시 CLI·TUI 는 그대로 동작, gui.py 진입점만 실패.
 
 # 테스트 (선택)
 pytest>=6.2

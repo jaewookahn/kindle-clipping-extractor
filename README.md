@@ -40,6 +40,7 @@ Kindle 기기의 하이라이트·메모·북마크를 여러 형식에서 파�
 | 스크립트 | 실행 방식 | 용도 |
 |----------|-----------|------|
 | `tui.py` | 대화형 | Textual TUI — 책 탐색·정렬·필터·표지/클리핑 미리보기·동기화 |
+| `gui.py` | 대화형 | 맥 GUI 앱(PyQt6) — TUI 와 동일 기능, 독립된 창 |
 | `sync_kfx.py` | 킨들 연결 후 자동 | KFX+YJR → Notion (메인 워크플로) |
 | `sync_clippings_to_notion.py` | 수동 보충 | My Clippings.txt → Notion |
 | `parse_clippings.py` | 단독 실행 | 단일 파일/디렉터리 파싱 후 파일 출력 |
@@ -133,6 +134,31 @@ KFX 메타데이터 추출은 kfxlib 호출이 권당 수백 ms 들기 때문에
 파일이 갱신되거나 교체되면 mtime/size 가 바뀌어 자동 무효화.
 
 `sync_kfx.py --titles` 와 TUI 양쪽에서 공유 → 한 번 추출하면 이후엔 즉시.
+
+---
+
+## 맥 GUI 앱 (`gui.py`)
+
+TUI 와 같은 백엔드(`kindle/` 패키지)를 그대로 쓰는 PyQt6 데스크톱 앱. 터미널 없이
+독립된 창에서 쓰고 싶을 때 사용한다.
+
+```bash
+pip install PyQt6           # requirements.txt 에 포함, 별도 설치도 가능
+python gui.py                                       # 자동 감지
+python gui.py --kindle "/path/Internal Storage"     # 경로 직접 지정
+```
+
+기능은 TUI 와 동일하다 — 책 목록(필터·정렬), 클리핑 미리보기(검색·표지·정렬),
+동기화 실행(dry-run/파일저장/Notion 업로드/reset 옵션 + 실시간 로그).
+정렬은 컬럼 헤더 클릭으로 하는 표준 GUI 방식이고, 표지는 실제 이미지로 그려진다 —
+TUI 가 터미널 그래픽 프로토콜(Kitty/Sixel/Halfcell)을 감지해 우회하던 코드는
+GUI 에는 필요 없다.
+
+동기화 실행은 TUI 와 마찬가지로 `sync_kfx.py` 를 subprocess(`QProcess`)로 그대로
+호출한다 — 동기화 로직 자체는 한 곳(`sync_kfx.py`)에만 있고 TUI·GUI 는 껍데기다.
+
+**의존성**: PyQt6 는 GPL. 개인용으로 쓰는 동안은 문제없지만, 이 앱을 배포할
+계획이 생기면 라이선스를 다시 확인할 것.
 
 ---
 

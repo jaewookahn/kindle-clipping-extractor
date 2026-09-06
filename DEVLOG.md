@@ -301,3 +301,37 @@ USB 연결하지 말 것.** MTP 기기만 여러 대 연결하는 것은 문제�
 1. `system_profiler SPUSBDataType | grep -A5 Kindle` 로 동시 연결된 기기 확인
 2. `ls /Volumes` 에 Mass Storage로 잡힌 구형 킨들이 있으면 `diskutil unmount` 로 제거
 3. TUI 재시도
+
+---
+
+## 10. TUI → PyQt6 GUI 전환 — subprocess 경계가 이미 있어서 수월했다
+
+TUI(`tui.py`)를 macOS GUI 앱으로 바꾸는 작업. 처음엔 네이티브 Swift/SwiftUI를
+검토했으나, kfxlib 로딩·YJR 바이너리 파싱·libmtp ctypes·Notion REST 같은
+파이썬 백엔드를 Swift에서 다시 부르는 브릿지 설계 비용이 커서 PyQt6로 방향을
+바꿨다 — 같은 프로세스에서 `kindle` 패키지를 그대로 import 해서 쓸 수 있다.
+
+**TUI를 미리 읽어보니 이미 절반은 프레임워크 독립적이었다.** 동기화 실행
+(`SyncOptions`)은 애초에 `subprocess.Popen(["python", "sync_kfx.py", ...])`
+로 CLI를 그대로 불러 stdout을 스트리밍하는 구조였다 — Textual 전용 코드가
+아니었다. 그래서 PyQt 이식은 `QProcess`로 껍데기만 바꾸면 됐고, 동기화 로직은
+한 줄도 다시 구현하지 않았다.
+
+반대로 클리핑 로드(`_load_clippings`)와 표지 조회(`_load_cover`)는 UI
+프레임워크와 무관한 순수 로직인데도 `ClippingPreview` 클래스 안에 인라인으로
+박혀 있었다. TUI·GUI가 코드를 중복하지 않도록 `kindle/clip_loader.py`,
+`kindle/covers.py`로 먼저 뽑아내고 TUI가 그걸 호출하도록 리팩터한 뒤 GUI를
+만들었다 — 순서를 반대로 했으면(GUI에서 로직을 새로 베껴 쓰고 나중에 합치기)
+두 버전이 갈라져 하나만 고치고 잊어버리는 문제가 났을 것이다.
+
+**터미널이라서 필요했던 코드가 전체의 상당 부분이었다.** Kitty/Sixel/Halfcell
+그래픽 프로토콜 감지, tmux passthrough, `KINDLE_TUI_IMAGE` 환경변수 처리 —
+표지 이미지 하나 보여주는 데 150줄 넘게 들어가 있었다. GUI에서는
+`QPixmap(path)` 한 줄이면 끝난다.
+
+**검증**: 실제 연결된 킨들(Scribe, 문서 146권)로 GUI를 직접 띄워 스크린샷
+확인 + 헤드리스 스크립트로 전 기능(책 목록 로드, 필터, 클리핑 로드 171개,
+클리핑 내 검색, 표지 로드, 단일 책 scope로 `--dry-run` subprocess 실행까지)
+end-to-end 확인. 129권 전체로 dry-run 하면 시간이 오래 걸려 검증 시엔
+`--book` 필터로 범위를 좁혔다 — SyncDialog가 scope_books 가 전체의 부분집합일
+때 `--book` 을 자동으로 붙이는 로직 덕분에 별도 코드 없이 됐다.

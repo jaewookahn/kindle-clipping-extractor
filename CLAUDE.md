@@ -18,6 +18,8 @@ kindle/
 ├── exporters.py       — export_* (parse_clippings용) / sync_export_* (sync용)
 ├── notion_export.py   — Notion 동기화 (_NotionAPI·fingerprint·상태 파일)
 ├── title_cache.py     — KFX 메타데이터(제목·저자) 디스크 캐시
+├── clip_loader.py     — load_book_clippings() — tui.py·kindle_gui 공유 클리핑 로드 파이프라인
+├── covers.py          — load_book_cover() — tui.py·kindle_gui 공유 표지 조회·캐싱
 ├── cli.py             — parse_clippings.py 의 실제 구현 (argparse + 파싱 흐름)
 ├── __main__.py        — `python -m kindle` 진입점 → cli.main()
 └── parsers/
@@ -27,8 +29,17 @@ kindle/
     ├── apnx.py         — APNX 페이지 인덱스 파서
     └── mbp.py          — MBP 어노테이션 파서
 
+kindle_gui/                  — 맥 GUI 앱(PyQt6). kindle/ 를 그대로 in-process import.
+├── main_window.py     — MainWindow (책 목록·필터·정렬·상태바) — tui.py KindleTUI 대응
+├── clipping_dialog.py — ClippingDialog (미리보기·검색·표지·정렬) — ClippingPreview 대응
+├── sync_dialog.py     — SyncDialog — sync_kfx.py 를 QProcess 로 실행 (subprocess, TUI 와 동일)
+├── device_picker.py   — DevicePickerDialog — KindlePicker 대응
+├── widgets.py          — SortItem (숫자·날짜 컬럼용 정렬 래퍼, 여러 화면 공유)
+└── workers.py          — QThreadPool 워커 헬퍼 (스캔·클리핑·표지 로드를 항상 백그라운드로)
+
 sync_kfx.py                  — 메인 워크플로 (KFX+YJR → Notion). --titles, --refresh-titles
 tui.py                       — Textual TUI (책 목록 + 클리핑 미리보기 + sync 옵션 모달)
+gui.py                       — 맥 GUI 앱 진입점 (kindle_gui 래퍼, PyQt6)
 sync_clippings_to_notion.py  — 보충 워크플로 (My Clippings.txt → Notion)
 parse_clippings.py           — 단일 파일/디렉터리 파싱 후 파일 출력 (kindle.cli 래퍼)
 sync_clippings.py            — My Clippings.txt 증분 동기화 (파일 출력 전용, Notion 없음)
@@ -39,8 +50,13 @@ notion_refresh_covers.py     — 기존 Notion 페이지의 표지만 일괄 재
 tests/  — pytest. fixture 는 examples/ 의 실제 KFX 사용
 ```
 
-**진입점은 8개** (`*.py` 루트). 그중 `.env` 를 읽는 것은 5개 —
-`sync_kfx`, `tui`, `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`.
+**진입점은 9개** (`*.py` 루트). 그중 `.env` 를 읽는 것은 6개 —
+`sync_kfx`, `tui`, `gui`, `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`.
+
+**TUI 와 GUI 는 백엔드를 공유한다.** `kindle/clip_loader.py`·`kindle/covers.py`가
+UI 프레임워크에 안 묶인 순수 함수로, `tui.py`(Textual)와 `kindle_gui/`(PyQt6)가
+둘 다 그대로 호출한다. 동기화 실행 로직은 재구현하지 않았다 — `kindle_gui/sync_dialog.py`
+도 TUI 의 `SyncOptions`와 마찬가지로 `sync_kfx.py`를 subprocess(`QProcess`)로 그대로 부른다.
 
 ---
 
@@ -315,10 +331,12 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q -p no:warnings
 
 `pip install -r requirements.txt` — 런타임/테스트 의존성 모두 포함.
 
-- `python-dotenv` — `.env` 로드. 진입점 5개(`sync_kfx`, `tui`,
+- `python-dotenv` — `.env` 로드. 진입점 6개(`sync_kfx`, `tui`, `gui`,
   `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`)가
   import 직후 `load_dotenv()` 호출. `NOTION_TOKEN`·`NOTION_DB` 를 여기서 읽는다.
   우선순위: CLI 인자 > 셸 환경변수 > `.env`. 템플릿은 `.env.example`.
+- `PyQt6` — 맥 GUI 앱(`gui.py`). GPL 라이선스 — 배포할 계획이 생기면 확인할 것.
+  미설치여도 CLI·TUI 는 그대로 동작하고 `gui.py` 진입점만 실패한다.
 - `tqdm` — 진행 표시
 - `requests` — Notion REST API 호출 + 표지 이미지 조회.
   Notion 클라이언트는 `kindle/notion_export.py` 의 `_NotionAPI` (429/5xx 백오프 재시도).
