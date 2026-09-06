@@ -5,11 +5,12 @@
 """
 
 import re
-from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -30,6 +31,11 @@ _CONTENT_COL = 7
 # 내용 컬럼(7)은 Stretch 라 여기 없다 — 나머지만 고정 폭
 _COL_WIDTHS = {0: 52, 1: 44, 2: 52, 3: 56, 4: 84, 5: 116, 6: 150}
 _COVER_W = 200
+# 줄바꿈을 끈 상태에서 내용 컬럼에 주는 폭. 창보다 넓게 잡아 가로 스크롤이 생긴다.
+_CONTENT_W_NOWRAP = 1000
+# 세로 가운데 정렬이면 한 줄짜리 셀이 긴 내용 옆에서 붕 떠 보인다 — 위로 붙인다.
+_ALIGN_TEXT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+_ALIGN_NUM = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
 
 # YJR 이 content 앞에 "[yellow] ..." 같은 prefix 를 붙인다. 분리해서 색 컬럼으로.
 _COLOR_RE = re.compile(r"^\[([a-zA-Z]+)\]\s*(.*)", flags=re.DOTALL)
@@ -66,6 +72,14 @@ class ClippingDialog(QDialog):
         self.clips: list = []
         self.errors: list[str] = []
         self.search_text = ""
+        # 기본은 한 줄 압축. 줄바꿈을 켜면 행이 매우 높아져 한 화면에
+        # 몇 건 못 본다 — 훑을 때는 압축, 읽을 때만 켜는 쪽이 낫다.
+        self.wrap_on = False
+        # 창 크기가 바뀌면 줄바꿈 높이를 다시 계산해야 한다(폭이 달라지므로).
+        # 리사이즈 중 매 프레임 계산하면 버벅이니 살짝 늦춘다.
+        self._row_resize_timer = QTimer(self)
+        self._row_resize_timer.setSingleShot(True)
+        self._row_resize_timer.timeout.connect(self._resize_rows)
 
         title = book.get("title", book["stem"])
         author = book.get("author", "")
@@ -80,10 +94,20 @@ class ClippingDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
+        top_row = QHBoxLayout()
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("🔍  검색 — 내용·챕터·색·타입")
         self.search_input.textChanged.connect(self._on_search_changed)
-        layout.addWidget(self.search_input)
+        top_row.addWidget(self.search_input, stretch=1)
+
+        self.wrap_check = QCheckBox("내용 줄바꿈", self)
+        self.wrap_check.setChecked(self.wrap_on)
+        self.wrap_check.setToolTip(
+            "끄면 한 줄로 압축된다 — 잘린 부분은 가로 스크롤이나 툴팁으로 확인"
+        )
+        self.wrap_check.toggled.connect(self._on_wrap_toggled)
+        top_row.addWidget(self.wrap_check)
+        layout.addLayout(top_row)
 
         body = QHBoxLayout()
 
@@ -117,21 +141,24 @@ class ClippingDialog(QDialog):
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setWordWrap(True)
         table.setAlternatingRowColors(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        # 픽셀 단위 스크롤 — 셀 단위로 튀지 않고 부드럽게 밀린다
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         header = table.horizontalHeader()
         for col, width in _COL_WIDTHS.items():
             table.setColumnWidth(col, width)
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        # 내용 컬럼이 남는 폭을 전부 차지 → 가로 스크롤 없이 본문이 접힌다
-        header.setSectionResizeMode(_CONTENT_COL, QHeaderView.ResizeMode.Stretch)
+        # _resize_rows 가 self.table 을 참조하므로 시그널 연결·정렬보다 먼저 붙인다.
+        self.table = table
         # 정렬하면 행 순서가 바뀌는데 행 높이는 위치에 남아 있어 내용과 어긋난다.
         # 정렬 직후 높이를 다시 계산해 준다.
-        header.sortIndicatorChanged.connect(lambda *_: table.resizeRowsToContents())
+        header.sortIndicatorChanged.connect(lambda *_: self._resize_rows())
         table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
-
-        self.table = table
+        self._apply_wrap_mode()
         body.addWidget(table, stretch=1)
 
         layout.addLayout(body, stretch=1)
@@ -209,7 +236,7 @@ class ClippingDialog(QDialog):
             table.setItem(0, _CONTENT_COL, SortItem(msg, 0))
             for col in range(_CONTENT_COL):
                 table.setItem(0, col, SortItem("-", 0))
-            table.resizeRowsToContents()
+            self._resize_rows()
             return
 
         clips = self._filtered_clips()
@@ -228,29 +255,33 @@ class ClippingDialog(QDialog):
             else:
                 shown = (raw or "").strip() or "·"
 
-            table.setItem(i, 0, SortItem(str(i + 1), i))
-            table.setItem(i, 1, SortItem(_TYPE_ICON.get(c.clip_type, c.clip_type), c.clip_type))
-
             color_item = SortItem(_COLOR_KO.get(color, color[:2] if color else "-"), color)
             if color in _COLOR_BG:
                 color_item.setBackground(QColor(_COLOR_BG[color]))
-            table.setItem(i, 2, color_item)
-
-            table.setItem(i, 3, SortItem(page_text, page))
-            table.setItem(i, 4, SortItem(loc, c.location_start if c.location_start is not None else 0))
-            table.setItem(i, 5, SortItem(date_text, c.added_date or ""))
 
             chapter_item = SortItem(c.chapter or "-", c.chapter or "")
             if c.chapter:
                 chapter_item.setToolTip(c.chapter)
-            table.setItem(i, 6, chapter_item)
 
             content_item = SortItem(shown, shown)
             content_item.setToolTip(shown)
-            table.setItem(i, _CONTENT_COL, content_item)
+
+            row_items = [
+                (0, SortItem(str(i + 1), i), _ALIGN_NUM),
+                (1, SortItem(_TYPE_ICON.get(c.clip_type, c.clip_type), c.clip_type), _ALIGN_NUM),
+                (2, color_item, _ALIGN_NUM),
+                (3, SortItem(page_text, page), _ALIGN_NUM),
+                (4, SortItem(loc, c.location_start if c.location_start is not None else 0), _ALIGN_NUM),
+                (5, SortItem(date_text, c.added_date or ""), _ALIGN_NUM),
+                (6, chapter_item, _ALIGN_TEXT),
+                (_CONTENT_COL, content_item, _ALIGN_TEXT),
+            ]
+            for col, item, align in row_items:
+                item.setTextAlignment(align)
+                table.setItem(i, col, item)
 
         table.setSortingEnabled(True)
-        table.resizeRowsToContents()
+        self._resize_rows()
 
     def _update_side_info(self) -> None:
         """표지 아래 책 정보 + 하단 경고줄 갱신."""
@@ -278,6 +309,43 @@ class ClippingDialog(QDialog):
             self.warn_label.setText("⚠  " + "  /  ".join(self.errors))
         else:
             self.warn_label.setText("")
+
+    # -- 줄바꿈 모드 --------------------------------------------------------
+
+    def _on_wrap_toggled(self, on: bool) -> None:
+        self.wrap_on = on
+        self._apply_wrap_mode()
+
+    def _apply_wrap_mode(self) -> None:
+        """줄바꿈 on/off 에 따라 내용 컬럼 폭 정책과 행 높이를 바꾼다."""
+        table = self.table
+        header = table.horizontalHeader()
+        table.setWordWrap(self.wrap_on)
+        if self.wrap_on:
+            # 남는 폭을 전부 내용 컬럼에 주고 그 안에서 접는다 (가로 스크롤 없음)
+            header.setSectionResizeMode(_CONTENT_COL, QHeaderView.ResizeMode.Stretch)
+        else:
+            # 창보다 넓게 고정 → 잘린 부분은 가로 스크롤로 본다
+            header.setSectionResizeMode(_CONTENT_COL, QHeaderView.ResizeMode.Interactive)
+            table.setColumnWidth(_CONTENT_COL, _CONTENT_W_NOWRAP)
+        self._resize_rows()
+
+    def _resize_rows(self) -> None:
+        table = self.table
+        if self.wrap_on:
+            table.resizeRowsToContents()
+        else:
+            h = table.fontMetrics().height() + 10
+            table.verticalHeader().setDefaultSectionSize(h)
+            for row in range(table.rowCount()):
+                table.setRowHeight(row, h)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt 오버라이드
+        super().resizeEvent(event)
+        # 줄바꿈 상태에서는 폭이 바뀌면 필요한 행 높이도 달라진다.
+        # 다시 계산하지 않으면 늘렸을 때 빈 공간이, 줄였을 때 잘림이 남는다.
+        if self.wrap_on:
+            self._row_resize_timer.start(120)
 
     def _on_search_changed(self, text: str) -> None:
         self.search_text = text
