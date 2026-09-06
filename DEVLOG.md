@@ -226,3 +226,78 @@ KFX TOC(`$212`)를 평탄화하면 부모 항목과 그 첫 자식이 **같은 c
 
 실제 예제(공산당선언)에서 32개 챕터, 부모 `제1장`(5389–36840)이 자식들
 (5391–35500)을 정확히 감싸고 페이지·Location 이 빈틈없이 이어지는 것을 확인.
+
+---
+
+## 9. 여러 킨들 동시 연결 시 MTP 읽기 실패 (Mass Storage vs MTP 충돌)
+
+**증상**: TUI에서 모든 책의 YJR/KFX 읽기가 `[Errno 60] Operation timed out` 으로
+동시에 실패. 디렉터리 목록(`iterdir`)은 정상 — 책 목록은 뜨는데 내용만 못 읽음.
+
+### 진단 과정
+
+디렉터리 목록이 되는데 내용 읽기만 실패하는 건 두 계층이 분리돼 있다는 뜻이다.
+macOS FileProvider(MacDroid 백엔드)가 디렉터리 구조는 캐시로 즉시 응답하고,
+파일 내용은 그때그때 기기에서 새로 받아와야 하기 때문.
+
+```python
+# 15권을 순회하며 실제 read_bytes() 소요 시간 측정
+ok=1 fail=14 elapsed=0.65s   # 14개 실패가 0.65초 만에 끝남
+```
+
+**핵심 단서는 속도였다.** 진짜 MTP 타임아웃이면 프로토콜 레벨에서 응답을 기다리다
+못 받는 데 시간이 걸려야 하는데, 실패가 파일당 0.03~0.06초 만에 났다. 이건 "기기에
+요청을 보냈는데 응답이 없다"가 아니라 "요청 자체가 상위 레이어에서 즉시 거부당했다"는
+신호다.
+
+당시 연결 상태를 `system_profiler SPUSBDataType` 로 확인하니 서로 다른 두 킨들이
+동시에 잡혀 있었다:
+
+```
+Amazon Kindle (Voyage)   Product ID 0x0004   Vendor 0x1949 (Lab126)
+Kindle Scribe            Product ID 0x9981   Vendor 0x1949 (Lab126)
+```
+
+같은 벤더(Lab126)지만 macOS 에 붙는 방식이 다르다:
+
+- **Voyage** (구형) — USB Mass Storage 클래스. macOS 커널 드라이버가 직접
+  디스크 볼륨으로 마운트 (`/Volumes/Kindle`).
+- **Scribe / Colorsoft** (신형) — MTP/PTP 프로토콜. MacDroid 가 FileProvider
+  확장으로 흉내내 `~/Library/CloudStorage/MacDroid-*/` 에 노출.
+
+### 재현/해결
+
+`/Volumes/Kindle` (Voyage 마운트)을 언마운트하자 Scribe 읽기가 즉시 정상화됐다.
+
+```
+Voyage 마운트됨   → Scribe 파일 읽기 100% 실패, Errno 60 즉시 발생
+Voyage 언마운트   → Scribe 파일 읽기 정상
+```
+
+### 원인 (추정)
+
+이 프로젝트 코드는 두 경로 모두 순수 파일시스템 API(`Path.read_bytes()`,
+`Path.iterdir()`) 만 쓴다 — USB/MTP 프로토콜에는 전혀 관여하지 않는다. 실패는
+OS 레벨에서 이미 일어난 뒤 그대로 올라온 것이다.
+
+Voyage 가 Mass Storage 볼륨으로 마운트돼 있으면, 같은 벤더 ID 를 다루는 macOS 의
+이미지/PTP 관련 공용 서비스(Image Capture Core 등)가 그 볼륨 클레임에 걸린 채로
+남아 있다가, 별도의 MTP 기기(Scribe)로 가는 파일 전송 요청까지 지연·거부시키는
+것으로 보인다. 두 기기가 물리적으로 다른 포트에 꽂혀 있어도 발생한다 —
+포트/허브 문제가 아니라 벤더 ID 또는 클래스 드라이버 레벨의 충돌로 보인다.
+
+**이 프로젝트가 고칠 수 있는 범위 밖이다** (macOS 커널 드라이버 ↔ MacDroid 앱
+사이의 상호작용). 코드에 결함이 있는 게 아니라 재현 가능한 하드웨어/OS 조합
+문제로 확인됨.
+
+### 회피 방법
+
+**Mass Storage 클래스 킨들(구형 기기)과 MTP 클래스 킨들(신형 기기)을 동시에
+USB 연결하지 말 것.** MTP 기기만 여러 대 연결하는 것은 문제없었다
+(KindleScribe + KindleColorsoftSignatureEdition 두 MacDroid 마운트가 동시에
+있어도 정상 — 실패는 항상 Mass Storage 기기가 같이 물려 있을 때만 발생).
+
+증상이 재발하면 확인 순서:
+1. `system_profiler SPUSBDataType | grep -A5 Kindle` 로 동시 연결된 기기 확인
+2. `ls /Volumes` 에 Mass Storage로 잡힌 구형 킨들이 있으면 `diskutil unmount` 로 제거
+3. TUI 재시도
