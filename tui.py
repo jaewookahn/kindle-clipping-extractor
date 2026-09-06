@@ -46,18 +46,9 @@ from kindle.title_cache import (
 from kindle.notion_export import (
     DEFAULT_STATE as NOTION_DEFAULT_STATE,
     load_state as load_notion_state,
-    _get_cover_url,
 )
-from kindle.parsers.yjr import parse_yjr
-from kindle.ebook import (
-    extract_kfx_info,
-    extract_kfx_cover,
-    fill_clipping_text,
-    fill_clipping_pages,
-    fill_clipping_chapters,
-    fill_clipping_kindle_locations,
-    _find_kfx_plugin,
-)
+from kindle.clip_loader import load_book_clippings
+from kindle.covers import load_book_cover
 
 import sync_kfx as sk
 
@@ -370,148 +361,29 @@ class ClippingPreview(ModalScreen):
             self.call_after_refresh(self._fit_now)   # 스크롤바 출현 후 재측정
 
     def _load_clippings(self) -> None:
-        """파이프라인(parse_yjr → fill_text → fill_pages → fill_kl)을 thread에서 실행."""
-        clips: list = []
-        errors: list[str] = []
+        """파이프라인(parse_yjr → fill_text → fill_pages → fill_kl)을 thread에서 실행.
 
-        sdr = self.book.get("sdr")
-        if sdr is None:
-            errors.append("SDR 폴더 없음 (책에 어노테이션이 한 번도 저장되지 않음)")
-        else:
-            yjr_files = list(sdr.glob("*.yjr"))
-            if not yjr_files:
-                errors.append("SDR 폴더에 YJR 파일 없음 (하이라이트·북마크 없음)")
-            for yjr in yjr_files:
-                try:
-                    clips.extend(parse_yjr(yjr, book_title=self.book["title"]))
-                except Exception as e:
-                    errors.append(f"YJR 파싱 실패 ({yjr.name}): {e}")
-
-        if clips:
-            if not _find_kfx_plugin():
-                errors.append("Calibre KFX Input 플러그인 없음 — 본문·페이지·챕터 추출 불가 "
-                              "(Calibre → 환경설정 → 플러그인 → 'KFX Input' 검색 후 설치)")
-            else:
-                # extract_kfx_info 내부의 [warn] 은 print(file=sys.stderr) 라서
-                # Textual 의 alternate screen 아래서는 화면에 보이지 않고 사라진다.
-                # 그래서 실패해도 사용자는 원인을 알 길이 없었다 — stderr 를 가로채
-                # 진짜 원인(예외 메시지)을 에러 목록에 그대로 노출시킨다.
-                import io
-                import contextlib
-                buf = io.StringIO()
-                try:
-                    with contextlib.redirect_stderr(buf):
-                        page_map, kl_offsets, book_text, toc = extract_kfx_info(self.book["kfx"])
-                    stderr_text = buf.getvalue().strip()
-                    if book_text:
-                        fill_clipping_text(clips, book_text)
-                    else:
-                        detail = f" — {stderr_text}" if stderr_text else " (원인 불명)"
-                        errors.append(f"KFX 본문 추출 실패{detail} "
-                                      "→ 하이라이트 텍스트가 비어 보일 수 있음")
-                    if page_map:
-                        fill_clipping_pages(clips, page_map)
-                    if toc:
-                        fill_clipping_chapters(clips, toc)
-                    if kl_offsets:
-                        fill_clipping_kindle_locations(clips, kl_offsets)
-                    else:
-                        errors.append("KL 맵 없음 → 위치가 raw char offset")
-                except Exception as e:
-                    errors.append(f"KFX 정보 추출 실패: {e}")
-
+        실제 로직은 kindle.clip_loader.load_book_clippings — kindle_gui(PyQt6)
+        와 공유한다.
+        """
+        clips, errors = load_book_clippings(self.book)
         # `_render` 같은 underscore-prefixed 이름은 Widget 내부 메서드와 겹쳐
         # Textual이 인자 없이 호출하는 경우가 있다. 안전한 이름 사용.
         self.app.call_from_thread(lambda: self._show_clips(clips, errors))
 
-    # 표지 이미지 디스크 캐시 — 한 번 받은 파일을 재사용해 두 번째 열기부터 즉시 표시
-    _COVER_DIR = Path.home() / ".cache" / "kindle_covers"
-
-    @classmethod
-    def _hi_res(cls, url: str) -> str:
-        """알라딘 cover200(200px) → cover500(500px) 으로 승격해 선명도 향상."""
-        return url.replace("/cover200/", "/cover500/") if "/cover200/" in url else url
-
-    def _cached_download(self, url: str) -> Optional[Path]:
-        """url 을 디스크 캐시에 받아 경로 반환. 캐시 hit 시 네트워크 생략."""
-        import hashlib, requests
-        self._COVER_DIR.mkdir(parents=True, exist_ok=True)
-        ext = (Path(url).suffix or ".jpg").split("?")[0]
-        dest = self._COVER_DIR / (hashlib.sha1(url.encode()).hexdigest() + ext)
-        if dest.exists() and dest.stat().st_size > 0:
-            return dest
-        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        dest.write_bytes(r.content)
-        return dest
-
-    def _embedded_cover_path(self, kfx: Path) -> Optional[Path]:
-        """KFX 임베디드 표지를 디스크 캐시에 추출해 경로 반환 (mtime·size 키)."""
-        import hashlib
-        self._COVER_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            st = kfx.stat()
-        except OSError:
-            return None
-        key = hashlib.sha1(
-            f"{kfx.resolve()}|{st.st_mtime_ns}|{st.st_size}".encode()
-        ).hexdigest()
-        for ext in ("jpg", "jpeg", "png", "webp", "gif"):
-            p = self._COVER_DIR / f"kfx_{key}.{ext}"
-            if p.exists() and p.stat().st_size > 0:
-                return p
-        res = extract_kfx_cover(kfx)
-        if not res:
-            return None
-        ext, raw = res
-        ext = {"jpeg": "jpg"}.get(ext, ext) or "jpg"
-        p = self._COVER_DIR / f"kfx_{key}.{ext}"
-        p.write_bytes(raw)
-        return p
-
     def _load_cover(self) -> None:
-        """표지: ① KFX 임베디드(오프라인·정확·고해상도) 우선 → ② 외부 검색 폴백."""
-        # ① KFX 파일에 내장된 정품 표지
-        kfx = self.book.get("kfx")
-        if kfx and Path(kfx).exists():
-            try:
-                p = self._embedded_cover_path(Path(kfx))
-                if p:
-                    self.app.call_from_thread(
-                        lambda p=p: self._swap_in_image(p, "KFX 내장 표지")
-                    )
-                    return
-            except Exception:
-                pass
-        # ② 외부 검색(알라딘 → Yes24 → Google Books)
-        try:
-            url = _get_cover_url(self.book["title"], self.book["author"])
-        except Exception as e:
-            self.app.call_from_thread(
-                lambda e=e: self._show_cover_text(f"[red]검색 실패: {e}[/red]")
-            )
+        """표지 조회 — 실제 로직은 kindle.covers.load_book_cover (kindle_gui 와 공유).
+
+        ① KFX 임베디드(오프라인·정확·고해상도) 우선 → ② 외부 검색 폴백.
+        """
+        path, caption = load_book_cover(self.book)
+        if path:
+            self.app.call_from_thread(lambda p=path, c=caption: self._swap_in_image(p, c))
             return
-        if not url:
-            self.app.call_from_thread(
-                lambda: self._show_cover_text("[dim](표지를 찾지 못함)[/dim]")
-            )
-            return
-        # 고해상도(cover500) 우선, 실패 시 원본(cover200)로 폴백
-        path = None
-        for candidate in (self._hi_res(url), url):
-            try:
-                path = self._cached_download(candidate)
-                if path:
-                    url = candidate
-                    break
-            except Exception:
-                continue
-        if path is None:
-            self.app.call_from_thread(
-                lambda: self._show_cover_text("[red]표지 다운로드 실패[/red]")
-            )
-            return
-        self.app.call_from_thread(lambda p=path, u=url: self._swap_in_image(p, u))
+        style = "red" if "실패" in caption else "dim"
+        self.app.call_from_thread(
+            lambda c=caption: self._show_cover_text(f"[{style}]{c}[/{style}]")
+        )
 
     def _show_cover_text(self, text: str) -> None:
         try:
