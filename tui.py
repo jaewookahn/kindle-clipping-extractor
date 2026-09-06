@@ -56,6 +56,7 @@ from kindle.ebook import (
     fill_clipping_pages,
     fill_clipping_chapters,
     fill_clipping_kindle_locations,
+    _find_kfx_plugin,
 )
 
 import sync_kfx as sk
@@ -387,23 +388,37 @@ class ClippingPreview(ModalScreen):
                     errors.append(f"YJR 파싱 실패 ({yjr.name}): {e}")
 
         if clips:
-            try:
-                page_map, kl_offsets, book_text, toc = extract_kfx_info(self.book["kfx"])
-                if book_text:
-                    fill_clipping_text(clips, book_text)
-                else:
-                    errors.append("KFX 본문 추출 실패 (kfxlib 없음 또는 KFX 손상) "
-                                  "→ 하이라이트 텍스트가 비어 보일 수 있음")
-                if page_map:
-                    fill_clipping_pages(clips, page_map)
-                if toc:
-                    fill_clipping_chapters(clips, toc)
-                if kl_offsets:
-                    fill_clipping_kindle_locations(clips, kl_offsets)
-                else:
-                    errors.append("KL 맵 없음 → 위치가 raw char offset")
-            except Exception as e:
-                errors.append(f"KFX 정보 추출 실패: {e}")
+            if not _find_kfx_plugin():
+                errors.append("Calibre KFX Input 플러그인 없음 — 본문·페이지·챕터 추출 불가 "
+                              "(Calibre → 환경설정 → 플러그인 → 'KFX Input' 검색 후 설치)")
+            else:
+                # extract_kfx_info 내부의 [warn] 은 print(file=sys.stderr) 라서
+                # Textual 의 alternate screen 아래서는 화면에 보이지 않고 사라진다.
+                # 그래서 실패해도 사용자는 원인을 알 길이 없었다 — stderr 를 가로채
+                # 진짜 원인(예외 메시지)을 에러 목록에 그대로 노출시킨다.
+                import io
+                import contextlib
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(buf):
+                        page_map, kl_offsets, book_text, toc = extract_kfx_info(self.book["kfx"])
+                    stderr_text = buf.getvalue().strip()
+                    if book_text:
+                        fill_clipping_text(clips, book_text)
+                    else:
+                        detail = f" — {stderr_text}" if stderr_text else " (원인 불명)"
+                        errors.append(f"KFX 본문 추출 실패{detail} "
+                                      "→ 하이라이트 텍스트가 비어 보일 수 있음")
+                    if page_map:
+                        fill_clipping_pages(clips, page_map)
+                    if toc:
+                        fill_clipping_chapters(clips, toc)
+                    if kl_offsets:
+                        fill_clipping_kindle_locations(clips, kl_offsets)
+                    else:
+                        errors.append("KL 맵 없음 → 위치가 raw char offset")
+                except Exception as e:
+                    errors.append(f"KFX 정보 추출 실패: {e}")
 
         # `_render` 같은 underscore-prefixed 이름은 Widget 내부 메서드와 겹쳐
         # Textual이 인자 없이 호출하는 경우가 있다. 안전한 이름 사용.
