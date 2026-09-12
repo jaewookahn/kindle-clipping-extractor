@@ -4,6 +4,9 @@ tqdm>=4.67              # 진행 표시 바
 requests>=2.33          # Notion REST API + 표지 이미지 조회 (notion_export.py)
                         # notional 은 pydantic v1 고정이라 제거됨 — REST 직접 호출
 pypdf>=6.0              # kfxlib이 일부 KFX 변형에서 요구. 없으면 본문·KL 맵 추출 실패.
+pillow>=10.0            # kfxlib resources.py 가 import. 없으면 kfxlib 자체가 안 올라온다.
+lxml>=5.0               # kfxlib original_source_epub.py 가 import (위와 동일).
+beautifulsoup4>=4.12    # lxml.html.soupparser 가 요구 (위와 동일).
 textual>=0.80           # TUI (tui.py). 미설치 시 CLI만 동작, TUI 진입점만 실패.
 textual-image[textual]>=0.13   # TUI 표지 이미지 (Half-block Unicode/iTerm/Kitty 자동 선택)
 
