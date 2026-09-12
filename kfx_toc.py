@@ -54,6 +54,20 @@ def load(kfx_path, U, YJ_Book):
     return b
 
 
+def pid_resolver(b):
+    """eid+offset -> 절대 문자 오프셋. 목차 타겟은 텍스트 요소가 아니라 컨테이너를
+    가리키는 책이 있어서(『권력과 진보』의 장 항목이 그랬다) 본문 청크만으로는
+    위치를 못 찾는다. 위치맵을 쓰면 그런 eid도 풀린다."""
+    pos_info = b.collect_position_map_info()
+
+    def resolve(eid, offset=0):
+        try:
+            return b.pid_for_eid(eid, offset, pos_info)
+        except Exception:
+            return None
+    return resolve
+
+
 def index_book(b, U):
     """eid -> (pid, section, text, style) 및 pid 정렬 목록."""
     chunks = sorted([c for c in b.collect_content_position_info() if c.text], key=lambda c: c.pid)
@@ -109,6 +123,7 @@ def cmd_plan(args):
         set_logger(logging.getLogger("kfx_toc"))
         b = load(args.kfx, U, YJ_Book)
         first, style = index_book(b, U)
+        pid_of = pid_resolver(b)
         frag, ncs = nav_containers(b, U)
         _, _, toc = existing_toc(ncs, U)
         if toc is None:
@@ -118,8 +133,11 @@ def cmd_plan(args):
             out = []
             for u in units:
                 t, eid, off = unit_info(u, U)
+                pid = pid_of(eid, off)
+                if pid is None:
+                    pid = first.get(eid, (None,))[0]
                 node = {"title": t, "eid": eid, "offset": off,
-                        "pid": first.get(eid, (None,))[0], "children": []}
+                        "pid": pid, "children": []}
                 if "$247" in U(u):
                     node["children"] = read_tree(U(U(u)["$247"]))
                 out.append(node)
