@@ -35,6 +35,11 @@ sync_clippings.py            — My Clippings.txt 증분 동기화 (파일 출�
 recover_clippings.py         — 한도 초과 텍스트 KFX 복구
 kfx_toc.py                   — KFX 목차($389/$212)만 수술적으로 편집 (하이라이트 앵커 보존). plan/apply/verify
 kfx_cover.py                 — KFX 표지 이미지($164/$417)만 교체 (같은 원칙). show/replace
+
+**KFX 편집 도구는 별도 계통이다** — 클리핑 파이프라인과 무관하게 책 파일 자체를 고친다.
+절차·주의사항은 `KFX_EDITING.md`, 역공학 기록은 `DEVLOG.md` §9.
+`tools/` 에 보조 도구가 있다: `kfx_toc_survey.py`(성긴 책 찾기),
+`bible_chapter_plan.py`(성경 전용 계획 생성기), `mtp_put.c`(libmtp 업로더).
 notion_create_db.py          — 필요한 스키마로 Notion DB 생성 (raw REST)
 notion_refresh_covers.py     — 기존 Notion 페이지의 표지만 일괄 재검색·교체
 

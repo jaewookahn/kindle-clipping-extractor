@@ -292,6 +292,24 @@ python sync_kfx.py --notion-db $NOTION_DB
 
 ---
 
+## KFX 목차·표지 편집 (하이라이트 보존)
+
+목차가 성긴 책을 고치거나 저해상도 표지를 갈아끼운다. 본문을 건드리지 않아 이미 쌓인
+하이라이트가 살아남는다 — 캘리버로 다시 만들면 eid 가 새로 매겨져 전부 깨진다.
+
+```bash
+python kfx_toc.py plan book.kfx --list-styles              # 스타일 분포
+python kfx_toc.py plan book.kfx --heading-styles s59 -o plan.json
+python kfx_toc.py apply book.kfx plan.json -o new.kfx
+python kfx_toc.py verify book.kfx new.kfx                  # 기기에 넣기 전 필수
+python kfx_cover.py replace book.kfx cover.jpg -o out.kfx
+python tools/kfx_toc_survey.py "~/Calibre Library" -o survey.json
+```
+
+→ 자세한 절차와 주의사항: **[KFX_EDITING.md](KFX_EDITING.md)**
+
+---
+
 ## 챕터 목차 (챕터별 페이지 범위)
 
 > **상태: 실험적.** 없어도 나머지 파이프라인은 그대로 동작합니다.
