@@ -34,13 +34,14 @@ parse_clippings.py           — 단일 파일/디렉터리 파싱 후 파일 �
 sync_clippings.py            — My Clippings.txt 증분 동기화 (파일 출력 전용, Notion 없음)
 recover_clippings.py         — 한도 초과 텍스트 KFX 복구
 kfx_toc.py                   — KFX 목차($389/$212)만 수술적으로 편집 (하이라이트 앵커 보존). plan/apply/verify
+kfx_cover.py                 — KFX 표지 이미지($164/$417)만 교체 (같은 원칙). show/replace
 notion_create_db.py          — 필요한 스키마로 Notion DB 생성 (raw REST)
 notion_refresh_covers.py     — 기존 Notion 페이지의 표지만 일괄 재검색·교체
 
 tests/  — pytest. fixture 는 examples/ 의 실제 KFX 사용
 ```
 
-**진입점은 9개** (`*.py` 루트). 그중 `.env` 를 읽는 것은 5개 —
+**진입점은 10개** (`*.py` 루트). 그중 `.env` 를 읽는 것은 5개 —
 `sync_kfx`, `tui`, `sync_clippings_to_notion`, `notion_create_db`, `notion_refresh_covers`.
 
 ---

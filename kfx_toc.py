@@ -275,7 +275,8 @@ def cmd_verify(args):
         diff = sorted(k for k in set(a["frags"]) | set(c["frags"])
                       if a["frags"].get(k) != c["frags"].get(k))
         print(f"  {'달라진 프래그먼트':<20}: {diff or '없음'}")
-        ok &= (diff == [("$389", "$389")] or diff == [])
+        expect = set(args.expect.split(",")) if args.expect else {"$389"}
+        ok &= all(ftype in expect for ftype, _ in diff)
         for label, key in (("추정 페이지 맵", "pages"),
                            ("킨들 로케이션 경계", "locs"),
                            ("본문 텍스트·오프셋", "chunks")):
@@ -298,7 +299,10 @@ def main():
     p = sub.add_parser("apply"); p.add_argument("kfx", type=Path)
     p.add_argument("plan"); p.add_argument("-o", "--out", required=True); p.set_defaults(fn=cmd_apply)
     p = sub.add_parser("verify"); p.add_argument("kfx", type=Path)
-    p.add_argument("new", type=Path); p.set_defaults(fn=cmd_verify)
+    p.add_argument("new", type=Path)
+    p.add_argument("--expect", help="달라져도 되는 프래그먼트 타입 (쉼표 구분, 기본 $389). "
+                                    "표지를 바꿨으면 '$164,$417'")
+    p.set_defaults(fn=cmd_verify)
     args = ap.parse_args()
     logging.basicConfig(level=logging.ERROR)
     sys.exit(args.fn(args) or 0)
