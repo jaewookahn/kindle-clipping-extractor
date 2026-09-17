@@ -155,6 +155,10 @@ python tools/kfx_toc_survey.py "~/Calibre Library" -o survey.json
 결과는 후보 목록일 뿐이다. 책을 열어 `--list-styles`와 `plan`을 눈으로 확인해야 한다.
 출판사 도서목록, 용어집, 화보 저작권 표시가 소제목으로 잡히는 경우가 남아 있다.
 
+2026-09-12 조사 결과와 오탐 유형: **[KFX_SURVEY_RESULTS.md](KFX_SURVEY_RESULTS.md)**
+(원본 JSON은 `tools/data/`). 적용한 세 권의 계획 JSON은 `examples/toc_plans/` 에 있다 —
+`apply` 에 그대로 먹이면 같은 결과가 재현된다.
+
 ---
 
 ## 지금까지 적용한 책

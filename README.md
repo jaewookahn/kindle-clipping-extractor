@@ -307,6 +307,7 @@ python tools/kfx_toc_survey.py "~/Calibre Library" -o survey.json
 ```
 
 → 자세한 절차와 주의사항: **[KFX_EDITING.md](KFX_EDITING.md)**
+→ 라이브러리 조사 결과: **[KFX_SURVEY_RESULTS.md](KFX_SURVEY_RESULTS.md)**
 
 ---
 
