@@ -30,7 +30,7 @@ def test_put_and_get(tmp_path):
     cache = {"version": 1, "books": {}}
     put_cached(cache, kfx, "소년이 온다", "한강")
     hit = get_cached(cache, kfx)
-    assert hit == {"title": "소년이 온다", "author": "한강"}
+    assert hit == {"title": "소년이 온다", "author": "한강", "asin": ""}
 
 
 def test_get_miss_when_size_changes(tmp_path):
@@ -61,7 +61,7 @@ def test_save_and_reload_roundtrip(tmp_path):
     assert "books" in raw
 
     reloaded = load_cache(out)
-    assert get_cached(reloaded, kfx) == {"title": "소년이 온다", "author": "한강"}
+    assert get_cached(reloaded, kfx) == {"title": "소년이 온다", "author": "한강", "asin": ""}
 
 
 def test_get_or_extract_caches_first_call(tmp_path):
@@ -75,7 +75,7 @@ def test_get_or_extract_caches_first_call(tmp_path):
 
     r1 = get_or_extract(cache, kfx, extractor)
     r2 = get_or_extract(cache, kfx, extractor)
-    assert r1 == r2 == {"title": "T", "author": "A"}
+    assert r1 == r2 == {"title": "T", "author": "A", "asin": ""}
     assert len(calls) == 1   # 두 번째는 캐시 hit
 
 
@@ -92,3 +92,31 @@ def test_get_or_extract_refresh_bypasses_cache(tmp_path):
     r = get_or_extract(cache, kfx, extractor, refresh=True)
     assert counter[0] == 2
     assert r["title"] == "T2"
+
+
+def test_asin_roundtrip(tmp_path):
+    """asin 은 KSDK 클리핑을 책에 매칭하는 열쇠다 — 캐시에 살아남아야 한다."""
+    kfx = _make_kfx(tmp_path)
+    cache = {"version": 1, "books": {}}
+    put_cached(cache, kfx, "제목", "저자", "W48DPCW9ADHS48KRFPLEY7215EJYUXYA")
+    assert get_cached(cache, kfx)["asin"] == "W48DPCW9ADHS48KRFPLEY7215EJYUXYA"
+    out = tmp_path / "c.json"
+    save_cache(out, cache)
+    assert get_cached(load_cache(out), kfx)["asin"] == "W48DPCW9ADHS48KRFPLEY7215EJYUXYA"
+
+
+def test_old_cache_entry_without_asin(tmp_path):
+    """asin 필드가 없던 시절의 캐시 항목도 깨지지 않고 읽혀야 한다."""
+    kfx = _make_kfx(tmp_path)
+    st = kfx.stat()
+    cache = {"version": 1, "books": {str(kfx.resolve()): {
+        "title": "옛항목", "author": "저자", "mtime": st.st_mtime, "size": st.st_size}}}
+    assert get_cached(cache, kfx) == {"title": "옛항목", "author": "저자", "asin": ""}
+
+
+def test_get_or_extract_stores_asin(tmp_path):
+    kfx = _make_kfx(tmp_path)
+    cache = {"version": 1, "books": {}}
+    r = get_or_extract(cache, kfx, lambda p: {"title": "T", "author": "A", "asin": "X1"})
+    assert r["asin"] == "X1"
+    assert get_cached(cache, kfx)["asin"] == "X1"

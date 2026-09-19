@@ -192,8 +192,14 @@ def extract_kfx_cover(kfx_path: Path) -> Optional[tuple[str, bytes]]:
 
 
 def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
-    """Extract title and author from a KFX file. Falls back to filename on failure."""
-    fallback: dict[str, str] = {"title": kfx_path.stem, "author": ""}
+    """Extract title/author/asin from a KFX file. Falls back to filename on failure.
+
+    `asin` 은 KSDK 어노테이션 DB 의 `book_data.asin` 과 같은 값이라 **책 매칭의
+    열쇠**다 — 사이드로드 책의 `.sdr` 폴더명에는 ASIN 이 없어서 이것 없이는
+    KSDK 클리핑을 어느 책에 붙일지 알 수 없다 (`kindle/ksdk.py` 참조).
+    없으면 빈 문자열.
+    """
+    fallback: dict[str, str] = {"title": kfx_path.stem, "author": "", "asin": ""}
     if not _find_kfx_plugin():
         return fallback
     try:
@@ -206,7 +212,8 @@ def extract_kfx_metadata(kfx_path: Path) -> dict[str, str]:
                 title = (getattr(mi, "title", None) or "").strip() or kfx_path.stem
                 authors = getattr(mi, "authors", None) or []
                 author = ", ".join(a for a in authors if a and a.lower() != "unknown")
-                return {"title": title, "author": author}
+                return {"title": title, "author": author,
+                        "asin": (getattr(mi, "asin", None) or "").strip()}
             except Exception:
                 pass
 

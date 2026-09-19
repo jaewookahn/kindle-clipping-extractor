@@ -71,11 +71,14 @@ def get_cached(cache: dict, kfx_path: Path) -> Optional[dict]:
         return None
     if entry.get("mtime") != st.st_mtime or entry.get("size") != st.st_size:
         return None
-    return {"title": entry["title"], "author": entry.get("author", "")}
+    # asin 은 나중에 추가된 필드다. 옛 캐시 항목엔 없으므로 기본값을 준다.
+    return {"title": entry["title"], "author": entry.get("author", ""),
+            "asin": entry.get("asin", "")}
 
 
-def put_cached(cache: dict, kfx_path: Path, title: str, author: str) -> None:
-    """캐시에 (title, author) 저장. 파일의 현재 mtime/size 를 같이 기록."""
+def put_cached(cache: dict, kfx_path: Path, title: str, author: str,
+               asin: str = "") -> None:
+    """캐시에 (title, author, asin) 저장. 파일의 현재 mtime/size 를 같이 기록."""
     try:
         st = kfx_path.stat()
     except OSError:
@@ -83,6 +86,7 @@ def put_cached(cache: dict, kfx_path: Path, title: str, author: str) -> None:
     cache.setdefault("books", {})[str(kfx_path.resolve())] = {
         "title":  title,
         "author": author,
+        "asin":   asin,
         "mtime":  st.st_mtime,
         "size":   st.st_size,
     }
@@ -96,7 +100,8 @@ def get_or_extract(
 ) -> dict:
     """캐시 hit 면 캐시값, 아니면 extractor(kfx_path) 호출 후 캐시에 저장.
 
-    extractor 는 {"title": str, "author": str} 를 반환해야 한다.
+    extractor 는 {"title": str, "author": str, "asin": str} 를 반환해야 한다
+    (`asin` 은 없어도 된다 — 빈 문자열로 저장된다).
     refresh=True 면 캐시를 무시하고 강제 재추출.
     """
     if not refresh:
@@ -106,5 +111,6 @@ def get_or_extract(
     meta = extractor(kfx_path)
     title  = meta.get("title", "") or kfx_path.stem
     author = meta.get("author", "") or ""
-    put_cached(cache, kfx_path, title, author)
-    return {"title": title, "author": author}
+    asin   = meta.get("asin", "") or ""
+    put_cached(cache, kfx_path, title, author, asin)
+    return {"title": title, "author": author, "asin": asin}
