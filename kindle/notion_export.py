@@ -498,6 +498,7 @@ def sync_to_notion(
     rewrite: bool = False,
     clip_fps: Optional[List[str]] = None,
     chapters_by_book: Optional[Dict[str, list]] = None,
+    summaries_by_book: Optional[Dict[str, str]] = None,
 ) -> dict:
     """Sync clippings to a Notion database.
 
@@ -514,6 +515,10 @@ def sync_to_notion(
     목차(페이지·Location 범위)를 쓴다. Notion append 는 끝에만 붙일 수 있어
     앞에 끼워 넣을 수 없으므로, 페이지를 새로 만들 때와 rewrite 때만 반영된다.
     기존 페이지에 목차를 넣으려면 --rewrite-bodies 로 다시 쓸 것.
+
+    summaries_by_book: {책 제목: 장별 요약 텍스트} — 클리핑 **뒤**에 붙는다.
+    뒤에 붙기 때문에 목차와 달리 기존 페이지에도 증분으로 추가된다
+    (append 는 끝에만 붙으므로 오히려 제약이 없다).
 
     Returns:
         {"added": int, "skipped": int, "books_new": int, "books_updated": int}
@@ -592,6 +597,10 @@ def sync_to_notion(
         if chapters_by_book:
             outline = format_chapter_outline(chapters_by_book.get(title) or [])
 
+        # 장별 요약은 클리핑 뒤. 끝에 붙으므로 기존 페이지에도 그대로 추가된다.
+        book_summary = (summaries_by_book or {}).get(title) or ""
+        tail = [book_summary] if book_summary else []
+
         title_author = f"{title} ({author})" if author else title
         print(title_author, flush=True)
         print("-" * len(title_author), flush=True)
@@ -614,17 +623,17 @@ def sync_to_notion(
                 last_date, enable_book_cover,
             )
             book_state["notion_page_id"] = page_id
-            _append_clippings(api, page_id, ([outline] if outline else []) + formatted)
+            _append_clippings(api, page_id, ([outline] if outline else []) + formatted + tail)
             summary["books_new"] += 1
             print(f"  ✓ 새 페이지 생성", flush=True)
         elif rewrite:
-            _rewrite_page_body(api, page_id, ([outline] if outline else []) + formatted)
+            _rewrite_page_body(api, page_id, ([outline] if outline else []) + formatted + tail)
             _update_page_properties(api, page_id, highlight_count_for_props, last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
             print(f"  ↻ 본문 재작성", flush=True)
         else:
-            _append_clippings(api, page_id, formatted)
+            _append_clippings(api, page_id, formatted + tail)
             _update_page_properties(api, page_id, highlight_count_for_props, last_date)
             book_state["notion_page_id"] = page_id
             summary["books_updated"] += 1
