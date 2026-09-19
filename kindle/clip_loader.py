@@ -17,6 +17,7 @@ from kindle.ebook import (
     fill_clipping_pages,
     fill_clipping_text,
 )
+from kindle.fileprovider import HINT, is_fileprovider_path, looks_unmaterialized
 from kindle.models import Clipping
 from kindle.parsers.yjr import parse_yjr
 
@@ -41,6 +42,10 @@ def load_book_clippings(book: dict) -> Tuple[List[Clipping], List[str]]:
         yjr_files = list(sdr.glob("*.yjr"))
         if not yjr_files:
             errors.append("SDR 폴더에 YJR 파일 없음 (하이라이트·북마크 없음)")
+            # MacDroid File Provider 는 .sdr 내용을 낡은 캐시로 답할 수 있다.
+            # 앱에서 고칠 방법이 없어(kindle/fileprovider.py 참조) 안내만 한다.
+            if is_fileprovider_path(sdr) and looks_unmaterialized(sdr):
+                errors.append(HINT.format(path=sdr))
         for yjr in yjr_files:
             try:
                 clips.extend(parse_yjr(yjr, book_title=book["title"]))
