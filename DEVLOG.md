@@ -335,3 +335,133 @@ TUI(`tui.py`)를 macOS GUI 앱으로 바꾸는 작업. 처음엔 네이티브 Sw
 end-to-end 확인. 129권 전체로 dry-run 하면 시간이 오래 걸려 검증 시엔
 `--book` 필터로 범위를 좁혔다 — SyncDialog가 scope_books 가 전체의 부분집합일
 때 `--book` 을 자동으로 붙이는 로직 덕분에 별도 코드 없이 됐다.
+
+---
+
+## 11. MacDroid File Provider 가 `.sdr` 내용을 낡은 캐시로 답한다
+
+**증상.** 기기에 하이라이트가 분명히 있는데 앱에서 클리핑이 하나도 안 뜬다.
+사용자가 Finder 로 그 폴더를 클릭한 *다음에야* 앱에서도 보이기 시작한다.
+
+```
+$ ls "baramyi geurimja 2 ….sdr"      # readdir(2)
+assets                               # ← .yjr 없음. 실제로는 하이라이트 64개
+```
+
+### 무엇이 아니었나
+
+처음엔 "책 파일이 기기에서 삭제됐고 `.sdr` 껍데기만 남은 것"으로 오진했다.
+근거로 든 `.sdr` 이 비어 있고 같은 stem 의 `.kfx` 가 없다는 관찰 자체는
+맞았지만, **찾은 폴더가 틀렸다.** 킨들은 같은 책에 대해 이름 규칙 두 개를 쓴다:
+
+| 형태 | 예 | 내용 |
+|---|---|---|
+| 한글 + ASIN | `먼저 온 미래_W48DPCW9….sdr` | 비어 있음 (껍데기) |
+| 로마자 `제목 - 저자` | `meonjeo on mirae - janggangmyeong.sdr` | **실제 `.kfx` + `.yjr`** |
+
+한글 이름으로만 찾으면 껍데기 쪽만 보게 된다. `.kfx` 도 로마자 쪽에 있다.
+교차표로 확인하면 상관관계가 완벽했다 — 빈 `.sdr` 중 책 파일이 있는 경우 0건.
+
+### 진짜 원인
+
+`fileproviderctl evaluate <path>` 로 Provider 에게 직접 물으면 드러난다:
+
+```
+childItemCount = 1;      ← Provider 가 자식이 1개라고 믿고 있다
+isDownloaded = 1;        ← 다운로드(materialize) 문제가 아니다
+```
+
+**재열거(re-enumeration) 문제**다. 그리고 이 캐시는 파일시스템 계층 전부에
+일관되게 적용된다 — 아래 셋 다 같은 낡은 값을 본다:
+
+- `readdir(2)` (`ls`, `Path.iterdir`)
+- `getattrlistbulk(2)` — Finder 가 쓰는 대량 열거 syscall. 직접 C 로 호출해도 동일
+- 이름 직접 조회 (`stat` on `<stem><HASH>.yjr`) — 파일명이
+  `<stem>c55055a60ca2cff566c471532c243e4e.yjr` 로 기기 전체가 같은 해시라
+  열거 없이 경로를 만들 수 있는데도 실패한다
+
+창 없는 Finder 질의(AppleScript `count items of folder`)도 **1** 을 답한다.
+즉 Finder 라서 되는 게 아니라, **폴더를 여는 행위가 새 enumerator 세션을
+만들기 때문에** MacDroid 가 기기에 다시 물어보는 것이다.
+
+### MTP 직접 읽기는 대안이 아니다
+
+`kindle/device.py` 의 `mtp_direct_session()` 은 MacDroid 를 우회하지만,
+MacDroid 가 USB 인터페이스를 점유하고 있어 함께 못 쓴다:
+
+```
+error returned by libusb_claim_interface() = -3
+LIBMTP PANIC: Unable to initialize device
+```
+
+둘은 상호 배타적이다. MacDroid 를 끄면 마운트가 사라지고, 켜면 MTP 가 막힌다.
+
+### 해결 — `kindle/fileprovider.py`
+
+`materialize()` 가 `NSFileCoordinator` 로 "업로드용 읽기"(`ForUploading`) 의도의
+코디네이트 읽기를 걸어 Provider 에게 진짜 내용을 요구한다.
+
+**Finder 를 자동으로 여는 코드는 의도적으로 넣지 않았다.** 초판에는 `open -g`
+폴백이 있었는데 — 동작은 확실하지만 — 일괄 처리 때 Finder 창이 29번 떴다 닫혔다.
+사용자 화면에 창을 띄우는 건 라이브러리가 할 짓이 아니라 제거했다.
+
+그래서 `materialize()` 는 **실패할 수 있다.** 조용히 "하이라이트 없음"으로
+넘어가면 원래 증상과 똑같아지므로, 실패하면 호출부가 `HINT` 로 안내한다:
+
+    MacDroid 가 이 책의 .sdr 내용을 낡은 캐시로 가리고 있습니다.
+    Finder 에서 해당 폴더를 한 번 열면 풀립니다: <경로>
+
+⚠️ **코디네이트 읽기가 실제로 재열거를 유발하는지는 미검증이다.** 검증하려면
+아직 안 채워진 `.sdr` 이 있는 기기가 필요한데, 한 번 채워진 폴더로는 다시
+시험할 수 없다 (Colorsoft 29권은 조사 중에 이미 다 소진). `.sdr/assets` 같은
+깊은 디렉터리로 시험해봤지만 Finder 로도 안 채워져서 — 즉 진짜 빈 폴더라서 —
+판별에 쓸 수 없었다. **Finder 로 폴더를 여는 것이 통한다는 사실만 확실하다.**
+
+연결 지점:
+- `kindle/clip_loader.py` — YJR 이 안 보이면 그 책만 재열거 요청 후 재시도,
+  실패하면 `HINT` 를 에러 목록에 넣는다
+- `sync_kfx.list_kfx_books(materialize_stale=True)` — 목록의 YJR 수치까지
+  고치는 일괄 경로. 권당 대기가 있어 **기본값은 False**
+- GUI 툴바 "숨은 클리핑 찾기" — 위 일괄 경로를 워커로 실행
+
+### 실측 (Colorsoft, 책 146권)
+
+```
+materialize 대상(YJR 안 보임)     29권
+실제로 살아난 책                    3권   ← 나머지 26권은 원래 하이라이트가 없었다
+  바람의 그림자 2   하이라이트 64개
+  마리아의 아들     YJR 만 생김 (북마크)
+  레 미제라블 4     YJR 만 생김 (북마크)
+일괄 소요                        153초
+```
+
+`looks_unmaterialized()` 는 "어노테이션 파일이 하나도 안 보임"으로 판정해서
+**하이라이트가 원래 없는 책도 True 가 된다**(오탐 26/29). 반대로 놓치면
+하이라이트가 통째로 안 보이므로 의도적으로 이쪽으로 치우치게 뒀다.
+
+### 진단에 쓸 수 있는 교차 검증
+
+`My Clippings.txt` 는 append-only 라 기기에서 파일이 가려져도 남아 있다.
+"My Clippings 에는 N건 있는데 `.sdr` 에 YJR 이 안 보이는 책"을 뽑으면
+가려진 책을 정확히 집어낼 수 있다 — 위 `바람의 그림자 2`(75건)를 이렇게 찾았다.
+
+---
+
+## 2026-09-19 — KSDK 어노테이션 중단 원인 규명 + 데이터 회수 완료
+
+8/25 이후 클리핑이 `.yjr`·`My Clippings.txt` 어디에도 안 남던 문제의 전모.
+전체 기록은 `KINDLE_ANNOTATION_OUTAGE.md` (§14~§16).
+
+- **원인**: 웨브랩 `KSDKANNOTATIONS_*` T1 코호트에 어노테이션 저장소가
+  `/mnt/us/system/ksdk/.annotations/<계정>/ksdk_annotation_v1.db` 로 이전된
+  **의도된 사양 변경**. 구 저널·사이드카 경로는 차단/격하. `.bad_file`
+  격리 루프와 빈 사이드카는 부수 증상. `;dm` 로그로 코드 레벨 확인.
+- **회수**: Véra 탈옥(≤5.19.6 지원) → `;log mrpi` 가 사용자 저장소 스크립트를
+  루트로 실행한다는 점을 이용해 스크립트 교체 → DB 전체 복사.
+  08-25 이후 839개 포함 2015년분까지 전량 생존.
+- **함의**: 사이드로드 신규 수집은 사이드카 경로로는 구조적으로 불가.
+  앞으로는 KSDK DB 파서(`kindle/`)가 주 경로가 된다. `shortPosition` 이
+  YJR 과 같은 PRE-KL char offset 이라 기존 fill 파이프라인·fingerprint 체계와
+  그대로 호환 (`My Clippings.txt` 는 POST-KL 이라 교차 dedup 은 여전히 불가).
+- **주의**: 5.19.x 에서 MRPI/KUAL 등 커뮤니티 ELF 바이너리는 라이브러리
+  로딩 문제로 안 돈다 (셸 스크립트 경로만 생존). Scribe 는 미회수.

@@ -17,9 +17,12 @@ kindle/
 ├── scanner.py         — 디렉터리 재귀 스캔 → 모든 파서 디스패치 (scan_path)
 ├── exporters.py       — export_* (parse_clippings용) / sync_export_* (sync용)
 ├── notion_export.py   — Notion 동기화 (_NotionAPI·fingerprint·상태 파일)
-├── title_cache.py     — KFX 메타데이터(제목·저자) 디스크 캐시
+├── title_cache.py     — KFX 메타데이터(제목·저자·**asin**) 디스크 캐시
 ├── clip_loader.py     — load_book_clippings() — tui.py·kindle_gui 공유 클리핑 로드 파이프라인
 ├── covers.py          — load_book_cover() — tui.py·kindle_gui 공유 표지 조회·캐싱
+├── fileprovider.py    — MacDroid File Provider 낡은 캐시 우회 (materialize)
+├── ksdk.py            — KSDKAnnotations DB 파서 (5.19.x 새 저장소, §16) — PRE-KL char offset
+├── wifi.py            — WifiReceiver — 기기가 curl 로 DB 를 푸시하면 받는 일회용 LAN 수신기
 ├── cli.py             — parse_clippings.py 의 실제 구현 (argparse + 파싱 흐름)
 ├── __main__.py        — `python -m kindle` 진입점 → cli.main()
 └── parsers/
@@ -37,7 +40,8 @@ kindle_gui/                  — 맥 GUI 앱(PyQt6). kindle/ 를 그대로 in-pr
 ├── widgets.py          — SortItem (숫자·날짜 컬럼용 정렬 래퍼, 여러 화면 공유)
 └── workers.py          — QThreadPool 워커 헬퍼 (스캔·클리핑·표지 로드를 항상 백그라운드로)
 
-sync_kfx.py                  — 메인 워크플로 (KFX+YJR → Notion). --titles, --refresh-titles
+sync_kfx.py                  — 메인 워크플로 (KFX+YJR → Notion). --titles, --refresh-titles,
+                               KSDK 모드: --ksdk-db, --wifi, --wifi-port, --wifi-bind, --wifi-timeout
 tui.py                       — Textual TUI (책 목록 + 클리핑 미리보기 + sync 옵션 모달)
 gui.py                       — 맥 GUI 앱 진입점 (kindle_gui 래퍼, PyQt6)
 sync_clippings_to_notion.py  — 보충 워크플로 (My Clippings.txt → Notion)
@@ -57,6 +61,76 @@ tests/  — pytest. fixture 는 examples/ 의 실제 KFX 사용
 UI 프레임워크에 안 묶인 순수 함수로, `tui.py`(Textual)와 `kindle_gui/`(PyQt6)가
 둘 다 그대로 호출한다. 동기화 실행 로직은 재구현하지 않았다 — `kindle_gui/sync_dialog.py`
 도 TUI 의 `SyncOptions`와 마찬가지로 `sync_kfx.py`를 subprocess(`QProcess`)로 그대로 부른다.
+
+---
+
+## 🚨 2026-08-25 이후 신규 클리핑 수집 불가 (KSDK 저장소 이전 — 사양 변경)
+
+Colorsoft·Scribe 두 기기 모두 하이라이트를 `.yjr` 과 `My Clippings.txt` 어디에도
+쓰지 않는다. 기기 화면에는 보인다. 사이드카는 생성되지만 어노테이션이 0개인
+껍데기(215B, sha `622b97111511` — **책이 달라도 동일**)이고, 킨들이 이를
+`.bad_file` 로 격리하고 재생성하는 루프를 돈다.
+
+**원인은 `;dm` 로그로 완전 규명 (2026-09-19, 문서 §14.12)**: 어노테이션 저장소가
+**의도적으로 KSDK 신규 경로** `/mnt/us/system/ksdk/.annotations/<account>/`
+(SQLite DB)로 이전됐다 (웨브랩 `KSDKANNOTATIONS_*` T1 코호트 단계적 적용,
+`/var/local/ENABLE_INIT_KSDK_SYNC_CLIENT` 존재 = 활성). 구 journal·사이드카
+경로는 명시적 차단/격하 (`skipping Kindle journal write`,
+`loadLegacySideCar()` 읽기 전용). `.bad_file` 격리 루프(§14.10)는 이 변경의
+**부수 증상**이다.
+
+**회수는 완료 (2026-09-19, §16)**: Véra 탈옥(≤5.19.6 지원, 브라우저 기반)으로
+루트 획득 → `;log` 스크립트 교체 트릭으로 `ksdk_annotation_v1.db` 전체 확보.
+08-25 이후 **839개 전량 생존**, 2015년분까지 포함. 5.19.x 에서 MRPI/KUAL
+등 커뮤니티 ELF 바이너리는 못 도는 문제가 있다 (셸 스크립트 경로만 살아 있음).
+
+- 사이드로드 어노테이션은 `nonsyncable_annotations` 테이블 — **클라우드 동기화
+  대상이 아니다** (§14.13 기각 확정).
+- **남은 것**: ① `kindle/` KSDK DB 파서 (§16.3 해독 완료 — `shortPosition` 이
+  YJR 과 같은 **PRE-KL char offset** 이라 기존 fill 파이프라인·fingerprint
+  체계와 그대로 호환. `My Clippings.txt` 는 POST-KL 이라 교차 dedup 은 여전히
+  불가) ② **Scribe 는 미회수** — 같은 절차로 회수 필요, 초기화 금지
+  ③ MRPI/KUAL ELF 문제 — noexec 아님(4개 위치 전부 실행 확인), 커뮤니티
+  바이너리의 라이브러리 비호환으로 확정(미해결). 셸 스크립트 경로와
+  WiFi 푸시(curl -T)는 동작.
+- **파서·MacDroid·MTP 모두 무고하다** (MTP 원본과 바이트 대조 완료).
+
+→ 전체 조사 기록·측정값·기각된 가설은 **`KINDLE_ANNOTATION_OUTAGE.md`**
+
+---
+
+## ⚠️ MacDroid 로 연결했을 때 클리핑이 안 보이면
+
+**킨들은 같은 책에 이름 규칙 두 개를 쓴다.** 한글 이름으로만 찾으면 껍데기를 본다:
+
+| 형태 | 예 | 내용 |
+|---|---|---|
+| 한글 + ASIN | `먼저 온 미래_W48DPCW9….sdr` | **비어 있음 (껍데기)** |
+| 로마자 `제목 - 저자` | `meonjeo on mirae - janggangmyeong.sdr` | 실제 `.kfx` + `.yjr` |
+
+그 다음, 로마자 폴더를 봐도 `.yjr` 이 없을 수 있다. MacDroid 의 File Provider 가
+`.sdr` 내용을 **낡은 `childItemCount` 캐시로** 답하기 때문이다. `readdir`·
+`getattrlistbulk`·이름 직접 `stat` 이 **전부 같은 낡은 값**을 본다 (셋 다 실측 확인).
+Finder 로 폴더를 *열* 때만 재열거가 일어난다.
+
+→ `kindle/fileprovider.py` 의 `materialize()` 가 `NSFileCoordinator` 로 재열거를
+요청한다. `load_book_clippings()` 가 YJR 이 안 보일 때 자동 호출한다.
+목록의 YJR 수치까지 고치려면 `list_kfx_books(materialize_stale=True)`
+(GUI 툴바 "숨은 클리핑 찾기"). 권당 대기가 있어 기본값은 꺼져 있다.
+
+**Finder 를 자동으로 여는 코드는 일부러 안 넣었다** (사용자가 명시적으로 뺐다 —
+일괄 처리 때 창이 수십 번 떴다). 그래서 `materialize()` 는 실패할 수 있고,
+그때는 `HINT` 문구로 "Finder 에서 한 번 열어보라"고 안내한다.
+⚠️ 코디네이트 읽기가 실제로 통하는지는 **미검증** — Finder 로 여는 것만 확실히
+확인됐다. 검증하려면 아직 안 채워진 `.sdr` 이 있는 기기가 필요하다.
+
+**MTP 직접 읽기(`mtp_direct_session`)는 대안이 아니다** — MacDroid 가 USB 를
+점유해 `libusb_claim_interface() = -3` 로 실패한다. 둘은 상호 배타적.
+
+가려진 책을 찾는 법: `My Clippings.txt` 는 append-only 라 파일이 가려져도 남는다.
+"My Clippings 에는 있는데 `.sdr` 에 YJR 이 없는 책"을 뽑으면 정확히 집어낼 수 있다.
+
+자세한 조사 기록은 `DEVLOG.md` 11절.
 
 ---
 
@@ -365,6 +439,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q -p no:warnings
 | 클리핑 = `paragraph` 1개 (본문 + `* 메타` 한 덩어리) | `divider` → 회색 `paragraph`(메타) → `quote`(본문) — 줄줄이 포맷으로 통일 |
 | 목차 = `format_chapter_outline()` 텍스트 블록 | 사람용 텍스트 + `code(json)` `clippings_toc` 병기 |
 | `APNXInfo.asin` / `page_count` 미활용 | Book 메타로 반영 (ASIN은 종이책 ISBN과 잇는 별칭 키) |
+| KSDK 파서(`kindle/ksdk.py`)의 `book_id`(ASIN-contentType-guid) 미노출 | `Devices` 속성 재료 — 파서가 이미 읽고 있으니 필드만 늘리면 됨 |
 
 ### ⚠️ 통합을 막고 있는 것 — `source_file` 이 지워진다
 
