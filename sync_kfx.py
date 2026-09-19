@@ -343,6 +343,7 @@ def process_book(
     seen_keys: Set[str],
     pbar: "tqdm",
     title_cache: Optional[dict] = None,
+    ksdk_by_asin: Optional[dict] = None,
 ) -> tuple[list[Clipping], list[str], str, str, int, list]:
     """
     YJR 파싱 → 신규 필터 → KFX 메타데이터·텍스트·페이지·KL 번호 채우기.
@@ -354,6 +355,11 @@ def process_book(
     Returns:
         (new_clippings, new_fingerprints, real_title, author, skipped_count, chapters)
         chapters 는 이 책의 [Chapter, …] (TOC 없으면 빈 리스트).
+
+    ksdk_by_asin: {ASIN: [Clipping, …]} 가 주어지면 **YJR 대신** KSDK DB 에서
+        온 클리핑을 쓴다 (펌웨어 5.19.x 이후 사이드카가 고아화된 기기).
+        좌표계가 같아서(PRE-KL char offset) 이후 fill_* 와 fingerprint 는
+        그대로 동작한다. 자세한 경위는 KINDLE_ANNOTATION_OUTAGE.md 참조.
     """
     global _current_book
 
@@ -367,20 +373,39 @@ def process_book(
 
     if title_cache is not None:
         meta = get_or_extract_title(title_cache, kfx_path, _extract)
+        # asin 은 나중에 추가된 필드라 예전 캐시 항목에는 없다. KSDK 매칭은
+        # ASIN 이 유일한 연결고리이므로, 비어 있으면 그 책만 강제 재추출한다.
+        if ksdk_by_asin is not None and not meta.get("asin"):
+            meta = get_or_extract_title(title_cache, kfx_path, _extract, refresh=True)
     else:
         meta = _extract(kfx_path)
     real_title = meta["title"]
     author     = meta["author"]
     _current_book = real_title  # 실제 제목으로 업데이트 → 이후 kfxlib 로그에 반영
 
-    # 2. YJR 파싱 (메타데이터에서 얻은 제목으로 book_title 설정)
-    pbar.set_postfix_str(f"{real_title[:40]}  YJR 파싱", refresh=True)
+    # 2. 클리핑 확보 — KSDK DB 우선, 없으면 YJR 사이드카
+    #
+    # KSDK 매칭은 ASIN 으로 한다. 사이드로드 책의 .sdr 폴더명에는 ASIN 이 없어서
+    # kfxlib 메타데이터의 asin 이 유일한 연결고리다 (extract_kfx_metadata 참조).
     all_clips: list[Clipping] = []
-    for yjr in sdr_path.glob("*.yjr"):
-        clips = parse_yjr(yjr, book_title=real_title)
-        for c in clips:
+    if ksdk_by_asin is not None:
+        asin = meta.get("asin", "")
+        pbar.set_postfix_str(f"{real_title[:40]}  KSDK", refresh=True)
+        for c in ksdk_by_asin.get(asin, []):
+            # book_title 은 반드시 제목 캐시 값으로 채운다. ASIN 플레이스홀더
+            # 상태로 fingerprint 를 만들면 기존 동기화분과 전부 어긋나
+            # (실측: 교집합 93 → 0) 이미 올린 항목이 중복 업로드된다.
+            c.book_title = real_title
             c.author = author
-        all_clips.extend(clips)
+            all_clips.append(c)
+    else:
+        pbar.set_postfix_str(f"{real_title[:40]}  YJR 파싱", refresh=True)
+        # KSDK 모드에서는 .sdr 이 없는 책도 목록에 오므로 None 을 견뎌야 한다.
+        for yjr in (sdr_path.glob("*.yjr") if sdr_path is not None else []):
+            clips = parse_yjr(yjr, book_title=real_title)
+            for c in clips:
+                c.author = author
+            all_clips.extend(clips)
 
     if not all_clips:
         return [], [], real_title, author, 0, []
@@ -457,12 +482,19 @@ def run_pipeline(args) -> int:
     with_clips = [b for b in books if b["yjr_count"] > 0]
     print(f"  KFX 총 {len(books)}권 (클리핑 있음: {len(with_clips)}권)")
 
-    if args.book:
-        patterns = [p.lower() for p in args.book]
-        books = [b for b in books if any(p in b["stem"].lower() for p in patterns)]
+    if args.book or args.book_exact:
+        # --book 은 부분 문자열, --book-exact 는 stem 전체 일치.
+        # 부분 문자열만 있으면 어떤 책의 stem 이 다른 책 stem 의 접두사일 때
+        # (예: "… ver.1" ⊂ "… ver.1 … 2") 의도치 않게 여러 권이 딸려 온다.
+        patterns = [p.lower() for p in (args.book or [])]
+        exacts = {p.lower() for p in (args.book_exact or [])}
+        books = [b for b in books
+                 if b["stem"].lower() in exacts
+                 or any(p in b["stem"].lower() for p in patterns)]
         with_clips = [b for b in books if b["yjr_count"] > 0]
+        shown = ", ".join((args.book or []) + (args.book_exact or []))
         print(f"  --book 필터: {len(books)}권 매칭 / 클리핑 {len(with_clips)}권  "
-              f"(패턴: {', '.join(args.book)})")
+              f"(패턴: {shown})")
         if not books:
             print("매칭되는 책이 없습니다. --list-books 로 stem 확인 후 다시 시도하세요.", file=sys.stderr)
             return 1
@@ -503,7 +535,12 @@ def run_pipeline(args) -> int:
                 print(f"{i:<4} {b['stem']:<55} {b['kfx'].suffix:<6} {status}")
         return 0
 
-    pairs = [(b["kfx"], b["sdr"], b["stem"]) for b in with_clips]
+    # KSDK 모드에서는 YJR 유무로 거르면 안 된다 — 사이드카가 고아화돼
+    # yjr_count 가 0 이어도 KSDK DB 에는 클리핑이 있다. .sdr 폴더도 없을 수 있다.
+    # (books 전체를 돌면 메타데이터 추출 비용이 들지만, ASIN 을 알아야
+    #  매칭되므로 피할 수 없다.)
+    pairs = [(b["kfx"], b["sdr"], b["stem"])
+             for b in (books if (args.wifi or args.ksdk_db) else with_clips)]
     if not pairs:
         print("처리할 책이 없습니다.")
         return 0
@@ -528,6 +565,49 @@ def run_pipeline(args) -> int:
             print(f"Notion 상태 파일 없음 (skip): {nstate_path}")
 
     seen_keys: Set[str] = set(state.get("seen_keys", []))
+
+    # ── 3b. KSDK 어노테이션 DB 확보 (WiFi 수신 또는 로컬 파일) ───────────
+    #
+    # 펌웨어 5.19.x 이후 어노테이션이 .yjr 대신 기기 내부 SQLite 로 간다.
+    # 그 DB 를 받아 쓰면 사이드카가 고아화된 기기에서도 신규 클리핑을 얻는다.
+    # 좌표계가 PRE-KL char offset 으로 YJR 과 같아 이후 처리는 동일하다.
+    ksdk_by_asin: Optional[dict] = None
+    if args.wifi or args.ksdk_db:
+        from kindle.ksdk import parse_ksdk_db
+
+        if args.ksdk_db:
+            db_path = Path(args.ksdk_db).expanduser()
+            if not db_path.exists():
+                print(f"오류: KSDK DB 없음 — {db_path}", file=sys.stderr)
+                return 1
+        else:
+            from kindle.wifi import WifiReceiver
+
+            out_dir = Path(args.state).expanduser().parent / "ksdk_wifi"
+            try:
+                rx = WifiReceiver(out_dir, port=args.wifi_port, bind=args.wifi_bind,
+                                  on_file=lambda n, sz, sha:
+                                      print(f"  받음 {n}  {sz:,}B  sha1 {sha[:12]}", flush=True))
+            except RuntimeError as e:
+                print(f"오류: {e}", file=sys.stderr)
+                return 1
+            with rx:
+                print("\nWiFi 수신 대기 중 …")
+                print(f"  기기 스크립트의 PUSH_URL: {rx.url}")
+                print(f"  기기 홈 화면 검색창에  ;log mrpi  를 입력하세요."
+                      f"  (제한 {args.wifi_timeout}초)\n")
+                result = rx.wait(args.wifi_timeout)
+            if result.db_path is None:
+                print("WiFi 수신 실패 — DB 를 받지 못했습니다.", file=sys.stderr)
+                return 1
+            db_path = result.db_path
+
+        ksdk_clips = parse_ksdk_db(db_path)
+        ksdk_by_asin = {}
+        for c in ksdk_clips:
+            ksdk_by_asin.setdefault(c.book_title, []).append(c)   # 제목 채우기 전엔 ASIN
+        print(f"KSDK DB: {db_path}")
+        print(f"  클리핑 {len(ksdk_clips)}개 / 책 {len(ksdk_by_asin)}권")
 
     # ── 4. 책별 처리 (progress bar) ──────────────────────────────────────
     all_new: list[Clipping] = []
@@ -555,6 +635,7 @@ def run_pipeline(args) -> int:
         for i, (kfx, sdr, stem) in enumerate(pbar, 1):
             new_clips, new_fps, real_title, author, skipped, chapters = process_book(
                 kfx, sdr, stem, effective_seen, pbar, title_cache=title_cache,
+                ksdk_by_asin=ksdk_by_asin,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
@@ -630,6 +711,35 @@ def run_pipeline(args) -> int:
             sync_export_text(all_new, out_path)
         print(f"저장: {out_path}")
 
+    # ── 5a2. 장별 요약 (선택) ────────────────────────────────────────────
+    # 요약은 클리핑 **뒤**에 붙는다 — Notion append 가 끝에만 붙으므로 이 배치는
+    # 기존 페이지에도 rewrite 없이 그대로 추가된다.
+    summaries_by_book: dict[str, str] = {}
+    if args.summarize:
+        from kindle.summarize import (DEFAULT_PATH as SUM_CACHE, SummarizerError,
+                                      format_chapter_summaries, load_cache,
+                                      save_cache, summarize_book)
+        cache = load_cache(Path(args.summary_cache or SUM_CACHE))
+        by_book: dict[str, list] = {}
+        for c in all_new:
+            by_book.setdefault(c.book_title, []).append(c)
+        print(f"\n장별 요약 생성 중 … ({args.summary_model}, {len(by_book)}권)")
+        for title, clips in by_book.items():
+            try:
+                pairs = summarize_book(
+                    clips, title, cache=cache, model=args.summary_model,
+                    progress=lambda i, n, ch: print(f"  [{title}] {i}/{n} {ch}",
+                                                    flush=True),
+                )
+            except SummarizerError as e:
+                print(f"  요약 실패 ({title}): {e}", file=sys.stderr)
+                continue
+            text = format_chapter_summaries(pairs, model=args.summary_model)
+            if text:
+                summaries_by_book[title] = text
+        save_cache(Path(args.summary_cache or SUM_CACHE), cache)
+        print(f"요약 완료: {len(summaries_by_book)}권")
+
     # ── 5b. Notion 업로드 (선택) ─────────────────────────────────────────
     if args.notion_token and args.notion_db:
         print("\nNotion 업로드 중 …")
@@ -642,6 +752,7 @@ def run_pipeline(args) -> int:
             rewrite=args.rewrite_bodies,
             clip_fps=all_new_fps,   # PRE-KL fingerprint 전달 → synced_fingerprints도 PRE-KL 기준
             chapters_by_book=chapters_by_book,
+            summaries_by_book=summaries_by_book,
         )
         print(
             f"Notion 완료: 추가 {result['added']}개 / skip {result['skipped']}개"
@@ -728,6 +839,10 @@ def main() -> None:
     parser.add_argument("--book", action="append", default=None, metavar="PATTERN",
                         help="특정 책만 처리 (stem 파일명 substring, 대소문자 무시). "
                              "여러 번 지정 가능: --book A --book B")
+    parser.add_argument("--book-exact", action="append", default=None, metavar="STEM",
+                        help="stem 전체가 일치하는 책만 처리 (대소문자 무시). "
+                             "어떤 책의 stem 이 다른 책 stem 의 접두사일 때 "
+                             "--book 이 여러 권을 잡는 문제를 피한다.")
     # Notion
     parser.add_argument("--notion-token", default=None, metavar="TOKEN",
                         help="Notion 통합 토큰 (NOTION_TOKEN 환경변수로도 설정 가능)")
@@ -737,6 +852,28 @@ def main() -> None:
                         help=f"Notion 상태 파일 경로 (기본값: {NOTION_DEFAULT_STATE})")
     parser.add_argument("--no-cover", action="store_true",
                         help="Notion 페이지에 책 표지 추가 안 함")
+    # WiFi / KSDK (펌웨어 5.19.x 이후 사이드카 고아화 대응)
+    parser.add_argument("--wifi", action="store_true",
+                        help="킨들이 WiFi 로 밀어 올린 KSDK 어노테이션 DB 를 받아서 쓴다. "
+                             "수신 URL 을 출력하고 기다린다 — 기기 검색창에 ';log mrpi' 입력. "
+                             "USB·MacDroid 불필요 (단 KFX 본문 추출에는 마운트가 필요).")
+    parser.add_argument("--wifi-port", type=int, default=8713, metavar="PORT",
+                        help="WiFi 수신 포트 (기본값: 8713)")
+    parser.add_argument("--wifi-bind", default=None, metavar="ADDR",
+                        help="WiFi 수신 바인드 주소 (기본: 자동 감지한 LAN IP)")
+    parser.add_argument("--wifi-timeout", type=int, default=600, metavar="SEC",
+                        help="WiFi 수신 제한시간 (기본값: 600초)")
+    parser.add_argument("--ksdk-db", default=None, metavar="FILE",
+                        help="이미 받아둔 ksdk_annotation_v1.db 를 쓴다 (수신 대기 없음)")
+
+    # 장별 요약 (DeepSeek)
+    parser.add_argument("--summarize", action="store_true",
+                        help="장별 상세 요약을 생성해 클리핑 뒤에 붙인다 "
+                             "(DEEPSEEK_API_KEY 필요). 장 안의 하이라이트를 입력으로 쓴다.")
+    parser.add_argument("--summary-model", default="deepseek-chat", metavar="MODEL",
+                        help="요약에 쓸 DeepSeek 모델 (기본값: deepseek-chat)")
+    parser.add_argument("--summary-cache", default=None, metavar="FILE",
+                        help="요약 캐시 경로 (기본값: ~/.kindle_summaries.json)")
     parser.add_argument("--no-chapter-outline", action="store_true",
                         help="클리핑 앞에 챕터별 페이지·Location 범위 목차를 넣지 않음 "
                              "(기본: KFX 목차가 있으면 넣음). Notion 에서는 페이지를 "
