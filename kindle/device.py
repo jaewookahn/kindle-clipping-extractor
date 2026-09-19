@@ -88,6 +88,55 @@ _File._fields_ = [
 ]
 
 
+class _Storage(ctypes.Structure):
+    """LIBMTP_devicestorage_struct (linked list node)"""
+
+_Storage._fields_ = [
+    ("id",                 ctypes.c_uint32),
+    ("StorageType",        ctypes.c_uint16),
+    ("FilesystemType",     ctypes.c_uint16),
+    ("AccessCapability",   ctypes.c_uint16),
+    ("MaxCapacity",        ctypes.c_uint64),
+    ("FreeSpaceInBytes",   ctypes.c_uint64),
+    ("FreeSpaceInObjects", ctypes.c_uint64),
+    ("StorageDescription", ctypes.c_char_p),
+    ("VolumeIdentifier",   ctypes.c_char_p),
+    ("next",               ctypes.POINTER(_Storage)),
+    ("prev",               ctypes.POINTER(_Storage)),
+]
+
+
+class _Device(ctypes.Structure):
+    """LIBMTP_mtpdevice_struct — `storage` 링크드 리스트에 접근하려고 정의한다.
+
+    뒤쪽 필드는 쓰지 않지만 레이아웃을 맞춰야 `storage` 오프셋이 맞는다.
+    """
+
+_Device._fields_ = [
+    ("object_bitsize",           ctypes.c_uint8),
+    ("params",                   ctypes.c_void_p),
+    ("usbinfo",                  ctypes.c_void_p),
+    ("storage",                  ctypes.POINTER(_Storage)),
+    ("errorstack",               ctypes.c_void_p),
+    ("maximum_battery_level",    ctypes.c_uint8),
+    ("default_music_folder",     ctypes.c_uint32),
+    ("default_playlist_folder",  ctypes.c_uint32),
+    ("default_picture_folder",   ctypes.c_uint32),
+    ("default_video_folder",     ctypes.c_uint32),
+    ("default_organizer_folder", ctypes.c_uint32),
+    ("default_zencast_folder",   ctypes.c_uint32),
+    ("default_album_folder",     ctypes.c_uint32),
+    ("default_text_folder",      ctypes.c_uint32),
+    ("cd",                       ctypes.c_void_p),
+    ("extensions",               ctypes.c_void_p),
+    ("cached",                   ctypes.c_int),
+    ("next",                     ctypes.c_void_p),
+]
+
+# LIBMTP_Get_Files_And_Folders 의 "이 폴더의 직속 자식" 루트 지정자
+_MTP_ROOT = 0xFFFFFFFF
+
+
 class _Folder(ctypes.Structure):
     """LIBMTP_folder_struct (tree node)"""
 
@@ -324,6 +373,52 @@ class MTPDirectSession:
 # Context manager for a direct libmtp session
 # ---------------------------------------------------------------------------
 
+def _decl_mtp_listing(lib: ctypes.CDLL) -> None:
+    """열거·다운로드에 쓰는 심볼의 시그니처를 선언한다 (한 번만 하면 된다)."""
+    lib.LIBMTP_Get_Storage.argtypes = [ctypes.POINTER(_Device), ctypes.c_int]
+    lib.LIBMTP_Get_Storage.restype = ctypes.c_int
+    lib.LIBMTP_Get_Files_And_Folders.argtypes = [
+        ctypes.POINTER(_Device), ctypes.c_uint32, ctypes.c_uint32]
+    lib.LIBMTP_Get_Files_And_Folders.restype = ctypes.POINTER(_File)
+    lib.LIBMTP_Get_File_To_File.argtypes = [
+        ctypes.POINTER(_Device), ctypes.c_uint32, ctypes.c_char_p,
+        ctypes.c_void_p, ctypes.c_void_p]
+    lib.LIBMTP_Get_File_To_File.restype = ctypes.c_int
+
+
+def _walk_storage(lib: ctypes.CDLL, dev, storage_id: int, parent_id: int,
+                  folders: dict, files: List[dict], depth: int = 0,
+                  max_depth: int = 6) -> None:
+    """`parent_id` 아래를 재귀로 훑어 folders/files 를 채운다.
+
+    킨들은 `documents/<Book>.sdr/<file>` 정도로 얕아서 기본 깊이 6이면 충분하다.
+    깊이 제한을 두는 이유는 순환 참조를 보고하는 기기가 있기 때문이다.
+    """
+    head = lib.LIBMTP_Get_Files_And_Folders(dev, storage_id, parent_id)
+    cur = head
+    children = []
+    while cur:
+        node = cur.contents
+        name = node.filename.decode(errors="replace") if node.filename else ""
+        if node.filetype == _LIBMTP_FILETYPE_FOLDER:
+            folders[node.item_id] = name
+            children.append(node.item_id)
+        else:
+            files.append({"id": node.item_id, "name": name,
+                          "parent_id": node.parent_id, "filetype": node.filetype})
+        cur = node.next
+    # 링크드 리스트 해제 후에 재귀 — 재귀 중 libmtp 내부 상태를 건드리지 않는다
+    cur = head
+    while cur:
+        nxt = cur.contents.next
+        lib.LIBMTP_destroy_file_t(cur)
+        cur = nxt
+    if depth < max_depth:
+        for cid in children:
+            _walk_storage(lib, dev, storage_id, cid, folders, files,
+                          depth + 1, max_depth)
+
+
 @contextlib.contextmanager
 def mtp_direct_session() -> Iterator[MTPDirectSession]:
     """Open a single-session libmtp connection and yield an MTPDirectSession.
@@ -400,41 +495,52 @@ def mtp_direct_session() -> Iterator[MTPDirectSession]:
         print("  Applied BROKEN_MTPGETOBJECTPROPLIST_ALL flag for unregistered "
               "Amazon device.", file=sys.stderr)
 
+    lib.LIBMTP_Open_Raw_Device_Uncached.restype = ctypes.POINTER(_Device)
     dev_handle = lib.LIBMTP_Open_Raw_Device_Uncached(ctypes.byref(rdev_copy))
     if not dev_handle:
         raise RuntimeError("Could not open MTP device.")
 
-    # ---- Single call: get ALL objects (files + folders) --------------------
-    # LIBMTP_Get_Filelisting_With_Callback returns every object on the device.
-    # Items with filetype == 0 (LIBMTP_FILETYPE_FOLDER) are directories.
-    # Using one call avoids the LIBMTP_Get_Folder_List bug on some devices.
     print("  Reading device file listing …", file=sys.stderr)
     folders: dict[int, str] = {}   # folder_id → folder_name
     files:   List[dict]     = []
 
-    raw_ptr = lib.LIBMTP_Get_Filelisting_With_Callback(dev_handle, None, None)
-    cur = raw_ptr
-    while cur:
-        node = cur.contents
-        name = node.filename.decode(errors="replace") if node.filename else ""
-        entry = {
-            "id":        node.item_id,
-            "name":      name,
-            "parent_id": node.parent_id,
-            "filetype":  node.filetype,
-        }
-        if node.filetype == _LIBMTP_FILETYPE_FOLDER:
-            folders[node.item_id] = name
-        else:
-            files.append(entry)
-        cur = node.next
+    # ---- 스토리지 열거 후 폴더 트리를 재귀로 훑는다 -------------------------
+    #
+    # 원래 이 자리에는 LIBMTP_Get_Filelisting_With_Callback 한 번 호출이 있었다.
+    # Kindle Colorsoft(VID 1949/PID 9981)에서 그 호출이 **항상 0개**를 돌려주는
+    # 것을 실측으로 확인했다 — 세션은 정상으로 열리고 LIBMTP_Get_Storage 도
+    # 0(성공)을 주는데 객체만 안 나온다. 같은 기기에서
+    # LIBMTP_Get_Files_And_Folders 로는 정상적으로 나온다(documents 410항목).
+    # 그래서 스토리지별 재귀 순회를 먼저 쓰고, 아무것도 못 얻었을 때만
+    # 예전 호출로 되돌아간다.
+    _decl_mtp_listing(lib)
+    if lib.LIBMTP_Get_Storage(dev_handle, 0) == 0:
+        st = dev_handle.contents.storage
+        while st:
+            sid = st.contents.id
+            _walk_storage(lib, dev_handle, sid, _MTP_ROOT, folders, files)
+            st = st.contents.next
 
-    # Free the linked list
-    cur = raw_ptr
-    while cur:
-        nxt = cur.contents.next
-        lib.LIBMTP_destroy_file_t(cur)
-        cur = nxt
+    if not folders and not files:
+        print("  (fallback) Get_Files_And_Folders 가 비어 Get_Filelisting 재시도",
+              file=sys.stderr)
+        raw_ptr = lib.LIBMTP_Get_Filelisting_With_Callback(dev_handle, None, None)
+        cur = raw_ptr
+        while cur:
+            node = cur.contents
+            name = node.filename.decode(errors="replace") if node.filename else ""
+            entry = {"id": node.item_id, "name": name,
+                     "parent_id": node.parent_id, "filetype": node.filetype}
+            if node.filetype == _LIBMTP_FILETYPE_FOLDER:
+                folders[node.item_id] = name
+            else:
+                files.append(entry)
+            cur = node.next
+        cur = raw_ptr
+        while cur:
+            nxt = cur.contents.next
+            lib.LIBMTP_destroy_file_t(cur)
+            cur = nxt
 
     print(f"  Found {len(folders)} folders, {len(files)} files.", file=sys.stderr)
     session = MTPDirectSession(lib, dev_handle, folders, files)
