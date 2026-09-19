@@ -27,3 +27,6 @@ gotong-final.md
 .idea/
 .vscode/
 *.swp
+
+# 앱 번들 빌드 산출물 (tools/make_app.py). 아이콘 원본 assets/ 는 추적한다.
+dist/
