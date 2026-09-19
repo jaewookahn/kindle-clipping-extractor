@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from kindle.device import find_kindle_candidates
+from kindle.fileprovider import HINT, stale_report
 from kindle.notion_export import DEFAULT_STATE as NOTION_DEFAULT_STATE
 from kindle.notion_export import load_state as load_notion_state
 from kindle.title_cache import DEFAULT_PATH as DEFAULT_TITLE_CACHE
@@ -84,6 +85,10 @@ class MainWindow(QMainWindow):
         self.addToolBar(bar)
 
         bar.addAction("제목 새로고침").triggered.connect(self._refresh_titles)
+        act = bar.addAction("숨은 클리핑 점검")
+        act.setToolTip("MacDroid 캐시에 가려졌을 수 있는 책을 찾아 목록으로 보여준다 "
+                       "(앱이 직접 고칠 수는 없다 — 조치 방법을 함께 안내)")
+        act.triggered.connect(self._check_stale)
         bar.addAction("동기화").triggered.connect(self._open_sync_dialog)
         bar.addAction("기기 변경").triggered.connect(self._detect_device)
 
@@ -123,6 +128,24 @@ class MainWindow(QMainWindow):
             on_done=self._on_books_loaded,
             on_error=lambda e: QMessageBox.critical(self, "스캔 실패", e),
         )
+
+    def _check_stale(self) -> None:
+        """MacDroid 캐시에 가려졌을 수 있는 책을 찾아 보여준다.
+
+        **고치지는 않는다.** 재열거·evict 를 코드로 강제하는 방법이 macOS 에서
+        전부 막혀 있어(kindle/fileprovider.py 참조) 탐지와 안내까지만 한다.
+        """
+        suspects = stale_report(self.books)
+        if not suspects:
+            QMessageBox.information(self, "점검 완료",
+                                    "캐시에 가려진 것으로 보이는 책이 없습니다.")
+            return
+        names = "\n".join(f"  · {b.get('title') or b['stem']}" for b in suspects[:25])
+        more = f"\n  … 외 {len(suspects) - 25}권" if len(suspects) > 25 else ""
+        QMessageBox.information(
+            self, "가려졌을 수 있는 책",
+            f"{len(suspects)}권이 의심됩니다 (실제로 하이라이트가 없는 책도 포함됩니다):\n\n"
+            f"{names}{more}\n\n" + HINT.format(path="위 책들의 .sdr 폴더"))
 
     def _scan_books(self, documents: Path) -> list[dict]:
         """워커 스레드에서 실행."""
@@ -242,13 +265,9 @@ class MainWindow(QMainWindow):
         if self.kindle_root is None:
             QMessageBox.warning(self, "기기 없음", "Kindle 경로가 없습니다.")
             return
-        if self.filter_text:
-            scope = self._filtered_books()
-            label = f"필터된 {len(scope)}권 (필터: '{self.filter_text}')"
-        else:
-            scope = self.books
-            label = "전체"
-        dlg = SyncDialog(self.kindle_root, scope, label, self.books, self)
+        # 범위 선택은 다이얼로그 안에서 한다 — 툴바에 버튼을 늘리지 않는다.
+        dlg = SyncDialog(self.kindle_root, self.books, self._filtered_books(),
+                         self.filter_text, self._current_book(), self)
         dlg.exec()
         # SyncOptions 가 닫히면 상태 reload → 상태바/Notion 카운트 갱신 (TUI 와 동일)
         self.title_cache = load_cache(DEFAULT_TITLE_CACHE)

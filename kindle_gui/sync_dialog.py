@@ -14,6 +14,7 @@ from PyQt6.QtCore import QProcess, QProcessEnvironment
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -49,24 +50,50 @@ def _line_color(text: str) -> str | None:
 
 
 class SyncDialog(QDialog):
-    def __init__(self, kindle_root: Path, scope_books: list[dict],
-                scope_label: str, all_books: list[dict], parent=None) -> None:
+    """동기화 옵션 + **대상 범위 선택**.
+
+    범위(전체 / 필터된 것 / 선택한 한 권)를 툴바 버튼으로 나누지 않고 여기서
+    고른다 — 버튼을 늘리면 툴바만 어수선해지고, 어차피 실행 직전에 확인해야 할
+    정보라 옵션들과 같은 화면에 있는 편이 낫다.
+    """
+
+    def __init__(self, kindle_root: Path, all_books: list[dict],
+                 filtered_books: list[dict], filter_text: str,
+                 selected_book: dict | None, parent=None) -> None:
         super().__init__(parent)
         self.kindle_root = kindle_root
-        self.scope_books = scope_books
         self.all_books = all_books
         self.proc: QProcess | None = None
 
+        # (라벨, 책 목록) — 콤보 순서대로. 중복되는 항목은 넣지 않는다.
+        self._scopes: list[tuple[str, list[dict]]] = []
+        if selected_book is not None:
+            name = selected_book.get("title") or selected_book["stem"]
+            self._scopes.append((f"선택한 책 1권 — {name}", [selected_book]))
+        if filter_text and len(filtered_books) != len(all_books):
+            self._scopes.append(
+                (f"필터된 {len(filtered_books)}권 — '{filter_text}'", filtered_books))
+        self._scopes.append((f"전체 {len(all_books)}권", all_books))
+
         self.setWindowTitle("동기화")
-        self.resize(720, 560)
-        self._build_ui(scope_label)
+        self.resize(720, 600)
+        self._build_ui()
+
+    @property
+    def scope_books(self) -> list[dict]:
+        return self._scopes[self.scope_combo.currentIndex()][1]
 
     # -- UI --------------------------------------------------------------
 
-    def _build_ui(self, scope_label: str) -> None:
+    def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel(f"<b>대상</b>  {scope_label}   ·   {len(self.scope_books)}권", self))
+        layout.addWidget(QLabel("<b>대상 범위</b>", self))
+        self.scope_combo = QComboBox(self)
+        for label, books in self._scopes:
+            self.scope_combo.addItem(label, len(books))
+        self.scope_combo.setCurrentIndex(0)   # 선택한 책 > 필터 > 전체 순으로 좁은 것 기본
+        layout.addWidget(self.scope_combo)
 
         layout.addWidget(QLabel("<b>출력 대상</b>", self))
         self.chk_file = QCheckBox("파일로 저장", self)
@@ -86,6 +113,18 @@ class SyncDialog(QDialog):
         layout.addWidget(self.chk_notion)
         if not has_env:
             hint = QLabel("NOTION_TOKEN·NOTION_DB 환경변수 필요", self)
+            hint.setStyleSheet("color: gray;")
+            layout.addWidget(hint)
+
+        has_llm = bool(os.environ.get("DEEPSEEK_API_KEY"))
+        self.chk_summary = QCheckBox("장별 상세 요약 생성 (DeepSeek) — 클리핑 뒤에 추가", self)
+        self.chk_summary.setEnabled(has_llm)
+        self.chk_summary.setToolTip(
+            "각 장의 하이라이트를 모아 LLM 으로 요약해 클리핑 뒤에 붙인다. "
+            "결과는 ~/.kindle_summaries.json 에 캐싱된다.")
+        layout.addWidget(self.chk_summary)
+        if not has_llm:
+            hint = QLabel("DEEPSEEK_API_KEY 환경변수 필요", self)
             hint.setStyleSheet("color: gray;")
             layout.addWidget(hint)
 
@@ -155,6 +194,7 @@ class SyncDialog(QDialog):
         reset = self.chk_reset.isChecked()
         reset_notion = self.chk_reset_notion.isChecked()
         rewrite = self.chk_rewrite.isChecked()
+        summarize = self.chk_summary.isChecked()
 
         if not (dry or file_o or notion):
             self._log("실행할 동작이 없습니다. dry-run / 파일 / Notion 중 하나 선택", _COLOR_BAD)
@@ -167,7 +207,11 @@ class SyncDialog(QDialog):
         if reset: active.append("로컬reset")
         if reset_notion: active.append("Notion-reset")
         if rewrite: active.append("챕터백필")
+        if summarize: active.append("장별요약")
+        self._log(f"대상: {self.scope_combo.currentText()}")
         self._log(f"모드: {' · '.join(active)}")
+        if summarize and not (notion or file_o):
+            self._log("요약은 Notion 업로드나 파일 저장과 함께 써야 결과가 남습니다.", _COLOR_WARN)
         if rewrite and not notion:
             self._log("챕터 백필은 Notion 업로드와 함께 써야 효과가 있습니다.", _COLOR_WARN)
 
@@ -204,11 +248,16 @@ class SyncDialog(QDialog):
             cmd.append("--reset-notion")
         if rewrite:
             cmd.append("--rewrite-bodies")
+        if summarize:
+            cmd.append("--summarize")
 
         stems = [b["stem"] for b in self.scope_books]
         if 0 < len(stems) < len(self._all_book_stems()):
+            # 전체 stem 을 아는 상태이므로 정확 일치로 넘긴다 — substring 매칭이면
+            # 어떤 stem 이 다른 stem 의 접두사일 때 고르지 않은 책까지 딸려 온다
+            # (실제 사례: "… ver.1" ⊂ "… ver.1 … 2").
             for s in stems:
-                cmd += ["--book", s]
+                cmd += ["--book-exact", s]
 
         self._log(f"$ {' '.join(self._mask(cmd))}")
 
