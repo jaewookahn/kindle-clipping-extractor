@@ -1,6 +1,6 @@
 # 킨들 어노테이션 내보내기 중단 — 조사 기록
 
-**작성**: 2026-09-19 · **상태**: 미해결, 호스트 쪽 조치 소진
+**작성**: 2026-09-19 · **상태**: 규명·회수 완료 — 남은 것: Scribe 회수, KFX WiFi 전송 실전 검증
 
 ---
 
@@ -19,8 +19,9 @@ KSDK 신규 경로 `/mnt/us/system/ksdk/.annotations/<account>/`(SQLite DB)로
 
 **회수는 2026-09-19 완료됐다 (§16)**: Véra 탈옥(≤5.19.6 지원)으로 루트 획득
 → `ksdk_annotation_v1.db` 전체 확보 — 08-25 이후 **839개 전량 생존**, 2015년
-분까지 포함. 파서 작업과 Scribe 회수가 남았다. **Amazon 은
-`AnnotationCacheLossMetrics` 로 격리 루프를 계측 중이다 (인지하고 있음).**
+분까지 포함. 파서(`kindle/ksdk.py`)·sync_kfx 통합·WiFi 푸시까지 완료. 남은 것:
+**Scribe 회수**와 **KFX WiFi 전송 실전 검증**(기기 재연결 시 스크립트 재배포)뿐.
+**Amazon 은 `AnnotationCacheLossMetrics` 로 격리 루프를 계측 중이다 (인지하고 있음).**
 
 ---
 
