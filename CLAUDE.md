@@ -95,6 +95,19 @@ Colorsoft·Scribe 두 기기 모두 하이라이트를 `.yjr` 과 `My Clippings.
   WiFi 푸시(curl -T)는 동작.
 - **파서·MacDroid·MTP 모두 무고하다** (MTP 원본과 바이트 대조 완료).
 
+### ⚠️ KSDK DB 에 대한 흔한 오해 두 가지 (§17 에서 전수 확인)
+
+1. **`device_name` 으로 기기를 구분할 수 없습니다.** 하이라이트·북마크·노트에는
+   그 필드가 **한 건도 없습니다** (dataset 8 `last_read` 전용). 값도 사용자 지정
+   이름이라 불안정하고 `Local`·`another device` 같은 플레이스홀더가 섞입니다.
+   불변 식별자(시리얼 등)는 DB 에 없습니다. → **삭제 탐지 금지 유지.**
+2. **`book_data.asin` 의 값은 ASIN 이 아닙니다.** 장서의 98.5% 가 사이드로드
+   (PDOC 140권)라 기기 생성 32자 내부 ID 이고, 진짜 ASIN 을 가진 책은 **4권뿐**
+   입니다. `asin:` 기반 book_key 는 KSDK 로도 되살아나지 않습니다.
+
+`book_id` 문자열은 **파싱하지 마십시오** — id 가 UUID 인 경우가 있어 첫 `-` 로
+자르면 깨집니다. `serialized_payload` 의 `book_data` 에서 꺼내면 됩니다.
+
 → 전체 조사 기록·측정값·기각된 가설은 **`KINDLE_ANNOTATION_OUTAGE.md`**
 
 ---

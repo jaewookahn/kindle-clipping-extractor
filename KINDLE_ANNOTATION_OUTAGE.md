@@ -928,3 +928,132 @@ KSDKAnnotations::NonsyncableAnnotationDAO: No datasets provided, returning all n
 로 분류된다는 근거는 **아직 없다** — 앞선 "전망 하향" 판단은 근거가 약해
 철회한다. 클라우드 회수 전망은 **미정**으로 되돌리고, 판정은 여전히 Kindle
 앱 로그인 확인에 달려 있다.
+
+---
+
+## 17. KSDK DB 구조 조사 — 기기 식별·ASIN 기대치 정정 (2026-09-20)
+
+통합 설계(리딩총괄) 쪽에서 "KSDK DB 에 `book_id`(ASIN 포함)와 `device_name` 이
+같이 있으니 **안정적 book_key 와 기기 식별이라는 두 난제를 동시에 해결한다**"는
+기대가 있었습니다. 회수본 DB 를 전수 조회해 확인한 결과 **그 기대는 성립하지
+않습니다.** 설계 우선순위에 직접 영향이 가므로 근거를 남깁니다.
+
+조회 대상: `~/kindle_annotation_backup/ksdk-recovered-20260919-0331/.annotations/
+amzn1.account.…/ksdk_annotation_v1.db` (Colorsoft 회수본, 3,353행)
+
+### 17.1 `device_name` 은 클리핑에 붙어 있지 않습니다
+
+`nonsyncable_annotations` 를 dataset 별로 전수 집계한 결과입니다.
+
+| dataset | 종류 | 건수 | `device_name` 보유 |
+|---|---|---|---|
+| 1 | HIGHLIGHT | 2,204 | **0** |
+| 2 | BOOKMARK | 668 | **0** |
+| 3 | NOTE | 105 | **0** |
+| 18 | POPULARHIGHLIGHT | 40 | **0** |
+| 7 | waypoint | 189 | **0** |
+| 8 | last_read | 147 | 147 (전부) |
+
+**하이라이트·북마크·노트에는 기기 정보가 한 건도 없습니다.** `device_name` 이
+붙는 것은 "읽던 위치"(last_read) 레코드뿐이고 그건 클리핑이 아닙니다.
+
+→ **클리핑별 기기 식별은 KSDK 로도 불가능합니다.** 삭제 탐지 금지 사유가
+유지되는 정도가 아니라, 해소 경로 하나가 막힌 것입니다.
+
+### 17.2 `device_name` 값 자체가 불안정합니다
+
+```
+nonsyncable_annotations : "Local", "another device"
+server_view             : "Jae-wook's Kindle Scribe", "Jae-wook's Kindle Voyage",
+                          "Local", "another device"
+```
+
+- **사용자 지정 이름**이라 기기 이름을 바꾸면 값이 바뀝니다. 불변 식별자가 아닙니다.
+- `Local`·`another device` 같은 **플레이스홀더가 섞입니다.**
+- 실제 기기명이 나오는 것은 `server_view`(클라우드 동기화된 읽기 위치) 22건뿐입니다.
+- **불변 식별자(시리얼 등)는 이 DB 에 없습니다** — `key_value_storage` 전수 확인,
+  `ANNOTATION_RECOVERY_STATUS` 와 책별 `MigrationStatus` 뿐입니다.
+
+기기 구분이 필요하면 추출 파이프라인이 "어느 기기에서 뽑았는지"를 **반입 시점에
+스스로 기록**하는 수밖에 없습니다. 현재는 `kindle_sync*.json` 최상위 `kindle_path`
+가 유일한 흔적인데 클리핑 레코드로 내려오지 않습니다 (`kindle/exporters.py` 의
+`source_file` strip 문제와 같은 뿌리).
+
+### 17.3 `book_id` 는 파싱하지 말 것 — payload 에 이미 분리돼 있습니다
+
+`serialized_payload` 안에 구조적으로 들어 있습니다.
+
+```json
+"book_data": {
+  "asin": "H7OCTJGYSM3Y3YAVEY8O8LX5QGWH19IB",
+  "contentType": "PDOC",
+  "guid": "CR!IXPC73LEY0KD66726K67OR8XM7TM",
+  "isOwnedByCustomer": 0, "isSample": 0
+}
+```
+
+`book_id` 문자열을 `-` 로 자르는 방식은 **실제로 깨집니다.** 하이픈 개수가
+일정하지 않습니다:
+
+```
+하이픈 3개 : 144권   01XHTU4O…-PDOC-CR!1VNSPVQ3…-0
+하이픈 7개 :   3권   01589ac8-a11f-4b48-9d19-b3f4ccc9a5c1-EBOK-Vera:83623E66-0
+```
+
+id 자체가 UUID 인 경우가 있어 첫 `-` 분할은 3건을 망가뜨립니다. **payload JSON 에서
+꺼내십시오.**
+
+### 17.4 ⚠️ `asin` 필드의 값은 ASIN 이 아닙니다
+
+필드 이름이 `asin` 이라 오해하기 쉽지만 내용이 다릅니다.
+
+```
+PDOC (사이드로드) : 140권 / 어노테이션 3,304건  (98.5%)
+EBOK (아마존 구매):   7권 / 어노테이션    49건  ( 1.5%)
+```
+
+PDOC 의 `asin` 값은 아마존 ASIN 이 아니라 **기기가 생성한 32자 내부 ID** 입니다.
+EBOK 7권 중에서도 3건은 `Vera`(탈옥 도구)·`Font_Calibration` 같은 시스템 항목이라,
+**진짜 ASIN 을 가진 실제 책은 4권뿐**입니다:
+
+```
+B000FCK3C8, B002ISDCKW, B004GHNIRK, B005CWUF3S
+```
+
+→ 통합 설계 P0 에서 "`asin:` 갈래가 죽어 있다"고 확정한 것이 **KSDK 에서도
+그대로입니다.** 사용자 장서가 거의 전부 사이드로드라 ASIN 이 애초에 없습니다.
+book_key 는 **저자 토큰 정렬** 같은 내용 기반 수단에 의존해야 합니다.
+
+PDOC 내부 ID 가 기기 간에도 같은지는 **검증 불가** — Scribe DB 가 아직 없어
+대조 대상이 없습니다.
+
+### 17.5 소실된 `kindle_sync.json` 대조 — KSDK 가 덮습니다
+
+`kindle_sync.json`(Colorsoft, 2026-06-28 추출, 29권 1,951건, 783KB)이 09-19 14:11
+사고 실행에 **덮어써져 소실**됐습니다 (지금은 157건 32KB). `.gitignore` 에
+`*.json` 이 있어 git 에도 없고 백업 디렉터리에도 사본이 없습니다. 리딩총괄이
+`~/prj`·Dropbox·Documents·Time Machine 로컬 스냅샷까지 확인했고 **복구 불가**입니다.
+
+**KSDK 회수본이 이를 덮는지 구조적으로 대조**했습니다. 소실분 추출 시각
+(2026-06-28 13:32:29)을 경계로 자른 결과입니다.
+
+| | 소실된 `kindle_sync.json` | KSDK 회수본 (같은 경계) |
+|---|---|---|
+| **책 수** | **29권** | **29권** ✅ |
+| 클리핑 수 | 1,951건 | 1,955건 |
+
+내역: HIGHLIGHT 1,455 / BOOKMARK 474 / NOTE 26.
+
+**책 수가 정확히 일치**하고 건수 차이는 0.2% 로, `POPULARHIGHLIGHT` 계수 여부 등
+파서 차이로 설명 가능한 범위입니다. 같은 기기의 전체 어노테이션 저장소이므로
+논리적으로도 포함 관계가 성립합니다.
+
+⚠️ **다만 본문 단위 완전성은 증명되지 않았습니다.** KSDK DB 에는 좌표
+(`shortPosition`)와 색상만 있고 **하이라이트 본문이 없습니다.** 본문 기준 대조는
+KFX 파일이 있어야 가능하고, KFX 는 기기에 있습니다. 기기 재연결 시 마저 할 일입니다.
+
+### 17.6 남은 일
+
+- 기기 재연결 후 **본문 기준 소실분 대조**
+- Scribe DB 확보 후 **PDOC 내부 ID 의 기기 간 동일성 검증**
+- 위 둘 다 지금은 재료가 없습니다
