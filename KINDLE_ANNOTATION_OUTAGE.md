@@ -736,6 +736,48 @@ ksdk_annotation_v1.db  3,682,304 B  SQLite 3
 - 미확인: ① 기기에 남은 `ota_status.txt` (다음 푸시 때 수신 예정)
   ② dry-run 34권 vs DB 전체 147권 차이 — 147권은 waypoint·last_read
   (dataset 7·8) 포함 수치로 보임.
+
+### 16.8 후속 정정 (2026-09-19 오후)
+
+**MacDroid 마운트 쓰기는 기기에 도달하지 않는다** — MTP 실측으로 확정.
+GUI 가 04:05 에 기기 스크립트의 `PUSH_URL` 을 마운트에 갱신했지만, 9시간 후
+MacDroid 종료 뒤 MTP 로 읽은 기기 원본은 **옛 토큰 그대로**였다. 13:47 의
+재배포 시도도 마찬가지로 미도달. 읽기 방향의 낡은 캐시(§9.2)와 짝을 이루는
+**쓰기 방향 캐시** — File Provider 는 로컬 캐시에만 쓰고 기기에 플러시하지
+않는다. (그래서 04:05 `;log mrpi` 는 옛 토큰으로 404 → USB 폴백만 동작했다)
+
+- **기기 파일 변경은 MTP 직접 쓰기만 신뢰 가능**: `LIBMTP_Delete_Object` +
+  `LIBMTP_Send_File_From_File` 로 교체 성공 (sha 검증, 중복 없음 확인).
+- **토큰 동적화로 경쟁 제거**: 기기 스크립트는 `BASE_URL`(IP:포트)만 갖고
+  실행 때 수신기의 `GET /token` 에서 토큰을 받는다 — 스크립트를 매번
+  갱신할 필요가 없다. (`kindle/wifi.py` + `tools/ksdk_push.sh` 개정,
+  tests/test_wifi.py 7개 추가)
+- **배포 후 주의**: MacDroid 를 다시 켜면 로컬에 캐시된 옛 스크립트 내용을
+  기기에 밀어 MTP 배포본을 덮을 수 있다. 재기동 후에는 MTP 로 재검증 필요.
+- 기기 실행 로그(04:05) 회수 확인: `uid=0(root)`, curl 404(옛 토큰) →
+  USB 폴백 복사 성공. 폴백본을 MTP 로 당겨온 결과 sha `1dcf8b5eab0398b7`
+  — 기존 회수본과 동일 (그 이후 새 어노테이션 없음).
+- `ota_status.txt` 는 옛 기기 스크립트에서 `exit 0` 뒤의 죽은 코드였다.
+  새 스크립트에 OTA 점검 블록을 push **앞**에 되살려 넣었고, 전송은 하되
+  **`pushed` 카운터는 DB 전용**으로 유지한다 (OTA 만 성공해 DB 가 실패한
+  경우 USB 폴백이 죽는 결함을 배포 직전 검토에서 잡았다).
+
+**기기 스크립트 최종 배포 (MTP, 검증 완료)**:
+
+```
+저장소본        sha1 0fae7533f59346b9ab1ef4f17e480084ee9e6f76
+배포본(BASE_URL 채움)  sha1 6dfec7fe8dcac9146d8d0a3f3c0846f0a70127de  5656B
+MTP delete/send rc=0, 기기 재다운로드 sha 일치 (별도 프로세스 검증)
+```
+
+- **MTP 세션 주의 (실측)**: 같은 프로세스에서 `MTPDirectSession` 을 두 번
+  열면 안 된다 — `close()` 가 의도적으로 `LIBMTP_Release_Device` 를 부르지
+  않아 인터페이스가 잡힌 채로 남고, 두 번째 열기는
+  `libusb_claim_interface() = -3`. 검증은 별도 프로세스로 할 것.
+- 남은 미검증: MTP 전송본의 **실행 권한** — `;log mrpi` 재시도에서
+  `push.log` 가 아예 안 생기면 exec 차단이 원인.
+- MacDroid 재기동 후에는 배포본이 캐시로 덮이지 않았는지 MTP 재검증 필요
+  (MacDroid 를 끈 상태에서만 MTP 가능).
 - 기기 원상복구: mrinstaller.sh 원본 복원 등 (동료 세션 진행 중)
 
 ### 16.6 기기 환경 조사 — WiFi 푸시 가능
