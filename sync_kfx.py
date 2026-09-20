@@ -1022,6 +1022,15 @@ def main() -> None:
     if not args.notion_db:
         args.notion_db = os.environ.get("NOTION_DB")
 
+    # 두 플래그는 2026-09-19 사고의 두 원인(덮어쓰기 / 껍데기 반입)에 각각
+    # 대응하는 안전장치다. 둘 다 끄면 그날 상태로 정확히 돌아간다.
+    if args.no_backup and args.allow_empty_text:
+        parser.error(
+            "--no-backup 과 --allow-empty-text 를 함께 쓸 수 없습니다. "
+            "이 둘은 2026-09-19 소실 사고의 두 원인(덮어쓰기 보호 / 본문 없는 반입)에 "
+            "각각 대응하는 안전장치라, 동시에 끄면 그날 상태가 그대로 재현됩니다. "
+            "정말 필요하면 한 번에 하나씩 쓰십시오.")
+
     has_output = bool(args.output)
     has_notion = bool(args.notion_token and args.notion_db)
     if not args.dry_run and not args.list_books and not has_output and not has_notion:
