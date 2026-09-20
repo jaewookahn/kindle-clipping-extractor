@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
+from urllib.parse import unquote
 
 __all__ = ["DEFAULT_PORT", "EXPECTED_FILES", "WifiReceiver", "ReceiveResult", "lan_ip"]
 
@@ -55,7 +56,11 @@ EXPECTED_FILES = ("ksdk_annotation_v1.db",
                   "ksdk_annotation_v1.db-shm",
                   "ota_status.txt")
 
-# DB 는 보통 수 MB. 방어적 상한.
+# KFX 본문도 받는다 — 책마다 파일명이 달라 확장자로 판별한다.
+def _allowed(name: str) -> bool:
+    return name in EXPECTED_FILES or name.lower().endswith(".kfx")
+
+# DB 는 보통 수 MB, KFX 는 수십 MB. 방어적 상한.
 MAX_BYTES = 256 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
@@ -100,8 +105,40 @@ class _Handler(BaseHTTPRequestHandler):
         logger.info("[%s] %s", self.address_string(), fmt % args)
 
     def _deny(self, code=404):
+        # 요청 본문을 읽어 버려야 클라이언트(curl)가 RST 대신 깨끗한 404 를
+        # 받는다 — 옛 토큰으로 푸시한 기기도 로그에 명확한 rc 를 남긴다.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            while length > 0:
+                chunk = self.rfile.read(min(65536, length))
+                if not chunk:
+                    break
+                length -= len(chunk)
+        except (ValueError, OSError):
+            pass
         self.send_response(code)
         self.end_headers()
+
+    def do_GET(self):
+        # 기기 스크립트가 토큰을 동적으로 받아간다. 스크립트에는 IP:포트만
+        # 고정해 두면 되므로 실행 때마다 갱신할 필요가 없다 (MacDroid 전파
+        # 지연으로 옛 토큰을 쓰는 경쟁을 원천 차단).
+        parts = [p for p in self.path.split("/") if p]
+        if parts == ["token"]:
+            body = self.receiver.token.encode()
+        elif parts == ["wanted"]:
+            # 맥이 본문을 원하는 책의 stem 목록 (줄 단위). 기기 스크립트가
+            # /mnt/us/documents/<stem>.kfx 를 찾아 올린다.
+            body = ("\n".join(self.receiver.wanted)
+                    + ("\n" if self.receiver.wanted else "")).encode()
+        else:
+            self._deny()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_PUT(self):
         r = self.receiver
@@ -109,8 +146,8 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) != 2 or parts[0] != r.token:
             logger.warning("거부(경로): %s", self.path)
             return self._deny()
-        name = os.path.basename(parts[1])
-        if name not in EXPECTED_FILES:
+        name = os.path.basename(unquote(parts[1]))
+        if not _allowed(name):
             logger.warning("거부(파일명): %s", name)
             return self._deny()
 
@@ -164,7 +201,8 @@ class WifiReceiver:
 
     def __init__(self, out_dir: Path, port: int = DEFAULT_PORT,
                  bind: Optional[str] = None,
-                 on_file: Optional[Callable[[str, int, str], None]] = None) -> None:
+                 on_file: Optional[Callable[[str, int, str], None]] = None,
+                 wanted: Optional[list] = None) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.host = bind or lan_ip()
@@ -173,6 +211,7 @@ class WifiReceiver:
         self.port = port
         self.token = secrets.token_urlsafe(9)
         self.on_file = on_file
+        self.wanted = list(wanted or [])
         self.result = ReceiveResult(out_dir=self.out_dir)
         self._done = threading.Event()
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -180,8 +219,17 @@ class WifiReceiver:
 
     @property
     def url(self) -> str:
-        """기기 스크립트의 `PUSH_URL` 에 넣을 값."""
+        """기기 스크립트의 `PUSH_URL` 에 넣을 값.
+
+        새 스크립트(tools/ksdk_push.sh)는 이 URL 의 토큰 부분을 직접 쓰지 않고
+        `GET /token` 으로 받아간다 — 여기에는 참조용으로만 남긴다.
+        """
         return f"http://{self.host}:{self.port}/{self.token}"
+
+    @property
+    def base_url(self) -> str:
+        """기기 스크립트의 `BASE_URL` 에 넣을 값 (토큰 제외)."""
+        return f"http://{self.host}:{self.port}"
 
     def start(self) -> "WifiReceiver":
         handler = type("_BoundHandler", (_Handler,), {"receiver": self})

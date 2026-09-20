@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
 )
 
@@ -64,6 +65,7 @@ class SyncDialog(QDialog):
         self.kindle_root = kindle_root
         self.all_books = all_books
         self.proc: QProcess | None = None
+        self._wifi_url_set = False
 
         # (라벨, 책 목록) — 콤보 순서대로. 중복되는 항목은 넣지 않는다.
         self._scopes: list[tuple[str, list[dict]]] = []
@@ -94,6 +96,35 @@ class SyncDialog(QDialog):
             self.scope_combo.addItem(label, len(books))
         self.scope_combo.setCurrentIndex(0)   # 선택한 책 > 필터 > 전체 순으로 좁은 것 기본
         layout.addWidget(self.scope_combo)
+
+        layout.addWidget(QLabel("<b>어노테이션 소스</b>", self))
+        src_row = QHBoxLayout()
+        self.chk_wifi = QCheckBox("WiFi 모드 — 기기에서 KSDK DB 수신", self)
+        self.chk_wifi.setToolTip(
+            "킨들이 WiFi 로 밀어 올린 ksdk_annotation_v1.db 를 받아서 쓴다. "
+            "실행 후 기기 홈 화면 검색창에  ;log mrpi  를 입력해야 한다.")
+        src_row.addWidget(self.chk_wifi)
+        src_row.addWidget(QLabel("포트", self))
+        self.wifi_port = QSpinBox(self)
+        self.wifi_port.setRange(1024, 65535)
+        self.wifi_port.setValue(8713)
+        src_row.addWidget(self.wifi_port)
+        src_row.addStretch(1)
+        layout.addLayout(src_row)
+
+        db_row = QHBoxLayout()
+        self.chk_ksdk_db = QCheckBox("이미 받은 KSDK DB 파일 사용", self)
+        self.chk_ksdk_db.setToolTip(
+            "WiFi 수신 없이 이미 확보한 ksdk_annotation_v1.db 를 쓴다 "
+            "(WiFi 모드와 같이 켜면 이쪽이 우선).")
+        db_row.addWidget(self.chk_ksdk_db)
+        self.ksdk_db_path = QLineEdit(
+            str(Path.home() / "kindle_annotation_backup" / "ksdk-recovered-20260919-0331"
+                / ".annotations" / "amzn1.account.AG4IK4ZSHJ4AVFVDXU4ZYLIGSAKA"
+                / "ksdk_annotation_v1.db"), self)
+        self.ksdk_db_path.setPlaceholderText("ksdk_annotation_v1.db 경로")
+        db_row.addWidget(self.ksdk_db_path, stretch=1)
+        layout.addLayout(db_row)
 
         layout.addWidget(QLabel("<b>출력 대상</b>", self))
         self.chk_file = QCheckBox("파일로 저장", self)
@@ -195,12 +226,17 @@ class SyncDialog(QDialog):
         reset_notion = self.chk_reset_notion.isChecked()
         rewrite = self.chk_rewrite.isChecked()
         summarize = self.chk_summary.isChecked()
+        ksdk = self.chk_ksdk_db.isChecked()
+        wifi = self.chk_wifi.isChecked() and not ksdk
+        self._wifi_url_set = False
 
         if not (dry or file_o or notion):
             self._log("실행할 동작이 없습니다. dry-run / 파일 / Notion 중 하나 선택", _COLOR_BAD)
             return
 
         active = []
+        if ksdk: active.append("KSDK-DB")
+        elif wifi: active.append("WiFi수신")
         if dry: active.append("dry-run")
         if file_o: active.append("파일저장")
         if notion: active.append("Notion업로드")
@@ -220,6 +256,15 @@ class SyncDialog(QDialog):
             "--kindle", str(self.kindle_root),
             "--no-progress",
         ]
+        if ksdk:
+            db_p = Path(self.ksdk_db_path.text().strip()).expanduser()
+            if not db_p.exists():
+                self._log(f"KSDK DB 파일이 없습니다: {db_p}", _COLOR_BAD)
+                return
+            cmd += ["--ksdk-db", str(db_p)]
+        elif wifi:
+            cmd += ["--wifi", "--wifi-port", str(self.wifi_port.value())]
+            self._log("WiFi 수신이 시작되면 기기 검색창에  ;log mrpi  를 입력하세요.", _COLOR_WARN)
         if dry:
             cmd.append("--dry-run")
         if file_o:
@@ -300,6 +345,58 @@ class SyncDialog(QDialog):
             text = text.rstrip()
             if text:
                 self._log(text, _line_color(text))
+            m = re.search(r"PUSH_URL:\s*(http://\S+)", text)
+            if m and not self._wifi_url_set:
+                self._wifi_url_set = True
+                self._update_device_push_url(m.group(1))
+
+    def _update_device_push_url(self, url: str) -> None:
+        """기기 스크립트의 수신 주소를 갱신한다.
+
+        새 스크립트는 BASE_URL(IP:포트)만 쓰고 토큰은 실행 때 GET /token 으로
+        받아가므로, MacDroid 전파 지연으로 토큰이 어긋나는 경쟁이 없다.
+        옛 스크립트(PUSH_URL)는 어쩔 수 없이 전체 URL 을 넣고 경고만 남긴다.
+        우리 스크립트(마커 확인)일 때만 갱신하고, MRPI 원본이면 건드리지 않는다.
+        """
+        base = url.rsplit("/", 1)[0]
+        script = (Path(self.kindle_root) / "extensions" / "MRInstaller"
+                  / "bin" / "mrinstaller.sh")
+        if not script.exists():
+            self._log("기기 스크립트를 마운트에서 찾지 못했습니다 — "
+                      f"기기 스크립트의 BASE_URL 을 직접 설정하세요: {base}", _COLOR_WARN)
+            return
+        try:
+            text = script.read_text()
+        except OSError as e:
+            self._log(f"기기 스크립트 읽기 실패({e}) — BASE_URL 을 직접 설정하세요: {base}",
+                      _COLOR_WARN)
+            return
+        if "# KSDK 어노테이션 DB 추출" not in text:
+            self._log("기기 스크립트가 우리 스크립트가 아닙니다 — 건드리지 않습니다. "
+                      f"BASE_URL 을 직접 설정하세요: {base}", _COLOR_WARN)
+            return
+        if "BASE_URL=" in text:
+            pat, val, show = r'^BASE_URL=".*"$', f'BASE_URL="{base}"', base
+        elif "PUSH_URL=" in text:
+            pat, val, show = r'^PUSH_URL=".*"$', f'PUSH_URL="{url}"', url
+            self._log("기기 스크립트가 옛 형식(PUSH_URL)입니다 — 새 스크립트로 "
+                      "교체하면 전파 지연과 무관하게 동작합니다.", _COLOR_WARN)
+        else:
+            self._log("스크립트에서 BASE_URL/PUSH_URL 줄을 찾지 못했습니다 — "
+                      f"직접 설정하세요: {base}", _COLOR_WARN)
+            return
+        new = re.sub(pat, val, text, count=1, flags=re.M)
+        if new == text:
+            self._log(f"주소 줄 치환 실패 — 직접 설정하세요: {show}", _COLOR_WARN)
+            return
+        try:
+            script.write_text(new)
+        except OSError as e:
+            self._log(f"기기 스크립트 쓰기 실패({e}) — 직접 설정하세요: {show}",
+                      _COLOR_WARN)
+            return
+        self._log(f"기기 스크립트 수신 주소 갱신 완료 → {show} — 이제 기기 검색창에 "
+                  " ;log mrpi  를 입력하세요.", _COLOR_GOOD)
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit:
