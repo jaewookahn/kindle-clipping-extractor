@@ -112,6 +112,26 @@ class SyncDialog(QDialog):
         src_row.addStretch(1)
         layout.addLayout(src_row)
 
+        # 하이라이트 본문은 KFX 에서 잘라내야 한다 (KSDK DB 에는 좌표만 있다).
+        # 캐시가 없는 책은 기기에서 KFX 도 받아 와야 케이블 없이 끝난다.
+        kfx_row = QHBoxLayout()
+        kfx_row.addSpacing(24)
+        kfx_row.addWidget(QLabel("본문(KFX)도 받기 — 최대", self))
+        self.wifi_kfx = QSpinBox(self)
+        self.wifi_kfx.setRange(0, 50)
+        self.wifi_kfx.setValue(0)
+        self.wifi_kfx.setSuffix(" 권")
+        self.wifi_kfx.setToolTip(
+            "본문 캐시가 없는 책의 KFX 를 WiFi 로 함께 받는다 (0 = 받지 않음).\n"
+            "권당 수십 MB 라 크게 잡으면 제한시간을 넘길 수 있다. 한 번 받은 책은 "
+            "추출 결과가 캐시되어 다시 받지 않는다.")
+        kfx_row.addWidget(self.wifi_kfx)
+        kfx_row.addStretch(1)
+        layout.addLayout(kfx_row)
+
+        self.chk_wifi.toggled.connect(self.wifi_kfx.setEnabled)
+        self.wifi_kfx.setEnabled(self.chk_wifi.isChecked())
+
         db_row = QHBoxLayout()
         self.chk_ksdk_db = QCheckBox("이미 받은 KSDK DB 파일 사용", self)
         self.chk_ksdk_db.setToolTip(
@@ -162,7 +182,13 @@ class SyncDialog(QDialog):
         layout.addWidget(QLabel("<b>실행 모드</b>", self))
         self.chk_dry = QCheckBox("미리보기만 — 아무것도 저장 안 함 (dry-run)", self)
         layout.addWidget(self.chk_dry)
-        self.chk_rewrite = QCheckBox("챕터 정보 다시 쓰기 — 기존 페이지 본문 재작성", self)
+        self.chk_rewrite = QCheckBox(
+            "본문 다시 쓰기 — 기존 페이지 재작성 (챕터 목차·요약 백필)", self)
+        self.chk_rewrite.setToolTip(
+            "dedup 을 무시하고 그 책의 클리핑 전체를 다시 끌어와 Notion 페이지 본문을 "
+            "통째로 다시 쓴다. fingerprint·표지·속성은 보존된다.\n\n"
+            "이미 동기화가 끝난 책에 챕터 목차나 장별 요약을 넣으려면 이것이 필요하다 — "
+            "신규 클리핑이 0건이면 그 책은 Notion 단계까지 가지 않기 때문이다.")
         layout.addWidget(self.chk_rewrite)
 
         layout.addWidget(QLabel("<b>상태 초기화  ⚠ 주의</b>", self))
@@ -249,7 +275,12 @@ class SyncDialog(QDialog):
         if summarize and not (notion or file_o):
             self._log("요약은 Notion 업로드나 파일 저장과 함께 써야 결과가 남습니다.", _COLOR_WARN)
         if rewrite and not notion:
-            self._log("챕터 백필은 Notion 업로드와 함께 써야 효과가 있습니다.", _COLOR_WARN)
+            self._log("본문 다시 쓰기는 Notion 업로드와 함께 써야 효과가 있습니다.", _COLOR_WARN)
+        if summarize and not rewrite:
+            # 신규 클리핑이 0건인 책은 Notion 단계까지 가지 않는다 — 요약만 켜면
+            # 이미 동기화가 끝난 책에서는 아무 일도 일어나지 않는다.
+            self._log("이미 동기화가 끝난 책에 요약을 넣으려면 "
+                      "'본문 다시 쓰기'도 함께 켜야 합니다.", _COLOR_WARN)
 
         cmd = [
             sys.executable, "sync_kfx.py",
@@ -264,6 +295,10 @@ class SyncDialog(QDialog):
             cmd += ["--ksdk-db", str(db_p)]
         elif wifi:
             cmd += ["--wifi", "--wifi-port", str(self.wifi_port.value())]
+            if self.wifi_kfx.value() > 0:
+                cmd += ["--wifi-kfx", str(self.wifi_kfx.value())]
+                self._log(f"본문 캐시가 없는 책 최대 {self.wifi_kfx.value()}권의 "
+                          f"KFX 도 함께 받습니다 (권당 수십 MB).")
             self._log("WiFi 수신이 시작되면 기기 검색창에  ;log mrpi  를 입력하세요.", _COLOR_WARN)
         if dry:
             cmd.append("--dry-run")
