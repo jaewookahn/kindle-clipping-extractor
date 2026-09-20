@@ -26,6 +26,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Callable, Optional
+from kindle import backup
 
 
 DEFAULT_PATH = Path.home() / ".kindle_kfx_titles.json"
@@ -50,8 +51,9 @@ def load_cache(path: Path = DEFAULT_PATH) -> dict:
 
 def save_cache(path: Path, cache: dict) -> None:
     try:
-        path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+        with backup.guard(path, "title_cache"):
+            path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
     except Exception as e:
         logger.error("title 캐시 저장 실패 (%s): %s", path, e)
 

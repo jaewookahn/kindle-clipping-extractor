@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 import requests
 
 from kindle.models import Clipping
+from kindle import backup
 
 DEFAULT_STATE = Path.home() / ".kindle_notion_sync.json"
 NO_COVER_IMG = "https://via.placeholder.com/150x200?text=No+Cover"
@@ -49,10 +50,11 @@ def load_state(path: Path) -> dict:
 
 def save_state(path: Path, state: dict) -> None:
     # default=str — UUID 등 비-JSON 타입 자동 문자열화 (재진입 시에도 정상)
-    path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    with backup.guard(path, "notion_state"):
+        path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
 
 
 # ---------------------------------------------------------------------------

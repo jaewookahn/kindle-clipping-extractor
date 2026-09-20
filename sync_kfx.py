@@ -58,6 +58,7 @@ load_dotenv()
 
 from tqdm import tqdm
 
+from kindle import backup
 from kindle.device import find_kindle
 from kindle.models import Clipping
 from kindle.parsers.yjr import parse_yjr
@@ -143,9 +144,15 @@ class _KindleFileHandler(logging.FileHandler):
             self._flush_pending()
 
         # 책 제목 주입 (메시지가 아직 '[...'로 시작하지 않는 경우만)
+        #
+        # `record.msg` 가 아니라 **이미 서식이 적용된** `msg` 를 쓴다. 원본
+        # `record.msg` 는 "%s 이 %s 로 줄었습니다" 같은 템플릿이고, 여기서
+        # args 를 비우면 치환이 영영 일어나지 않아 로그에 %s 가 그대로 찍힌다.
+        # (`kindle/backup.py` 의 급감 경고에서 실제로 그렇게 나왔다. 기존
+        #  메시지들이 대부분 '['로 시작해 이 경로를 안 타서 드러나지 않았다.)
         if book and not msg.startswith("["):
             record = logging.makeLogRecord(record.__dict__)
-            record.msg  = f"[{book}] {record.msg}"
+            record.msg  = f"[{book}] {msg}"
             record.args = ()
 
         if record.levelno >= logging.ERROR:
@@ -230,7 +237,8 @@ def load_state(path: Path) -> dict:
 
 def save_state(path: Path, state: dict) -> None:
     try:
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        with backup.guard(path, "kfx_state"):
+            path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         logger.error("상태 파일 저장 실패 (%s): %s", path, e)
 
@@ -531,6 +539,11 @@ def process_book(
 def run_pipeline(args) -> int:
     setup_logging(Path(args.log))
 
+    if getattr(args, "no_backup", False):
+        backup.disable()
+        print("⚠ 자동 백업이 꺼졌습니다 — 덮어쓰기 전 스냅샷이 만들어지지 않습니다.",
+              file=sys.stderr)
+
     # ── 1. 킨들 마운트 감지 ──────────────────────────────────────────────
     if args.kindle:
         kindle_root = Path(args.kindle)
@@ -796,16 +809,19 @@ def run_pipeline(args) -> int:
             "book_count":  len({c.book_title for c in all_new}),
         }
 
-        if fmt == "json":
-            sync_export_json_grouped(all_new, out_path, meta,
+        # 2026-09-19 에 이 덮어쓰기가 783KB(29권 1,951건) 산출물을 32KB 로 날렸다.
+        # 정상 종료한 실행이었다 — 그래서 성공/실패를 따지지 않고 무조건 뜬다.
+        with backup.guard(out_path, "sync_output"):
+            if fmt == "json":
+                sync_export_json_grouped(all_new, out_path, meta,
+                                         chapters_by_book=chapters_by_book)
+            elif fmt == "csv":
+                sync_export_csv(all_new, out_path)
+            elif fmt == "markdown":
+                sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑",
                                      chapters_by_book=chapters_by_book)
-        elif fmt == "csv":
-            sync_export_csv(all_new, out_path)
-        elif fmt == "markdown":
-            sync_export_markdown(all_new, out_path, heading="킨들 KFX 클리핑",
-                                 chapters_by_book=chapters_by_book)
-        else:
-            sync_export_text(all_new, out_path)
+            else:
+                sync_export_text(all_new, out_path)
         print(f"저장: {out_path}")
 
     # ── 5a2. 장별 요약 (선택) ────────────────────────────────────────────
@@ -933,6 +949,12 @@ def main() -> None:
                         help=f"제목·저자 캐시 경로 (기본값: {DEFAULT_TITLE_CACHE})")
     parser.add_argument("--refresh-titles", action="store_true",
                         help="--titles 캐시를 무시하고 강제 재추출")
+    # 끄는 경로를 이 인자 하나로 좁힌다. 환경변수·설정파일로는 꺼지지 않는다 —
+    # 조용히 꺼질 수 있으면 2026-09-19 같은 소실이 다시 난다 (BACKUP_DESIGN.md §4).
+    parser.add_argument("--no-backup", action="store_true",
+                        help="덮어쓰기 전 자동 백업을 끈다. 권장하지 않는다 — "
+                             "2026-09-19 에 정상 종료한 실행이 산출물을 783KB→32KB 로 "
+                             "덮어써 복구하지 못했다")
     parser.add_argument("--text-cache", default=str(DEFAULT_TEXT_CACHE), metavar="DIR",
                         help=f"KFX 본문·목차 캐시 디렉터리 (기본값: {DEFAULT_TEXT_CACHE}). "
                              "책당 한 번만 추출하고 이후에는 KFX 파일 없이도 본문을 채운다 "

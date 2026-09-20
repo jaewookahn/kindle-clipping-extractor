@@ -37,6 +37,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
+from kindle import backup
 from kindle.models import Clipping
 
 DEFAULT_PATH = Path.home() / ".kindle_summaries.json"
@@ -104,8 +105,9 @@ def save_cache(path: Path = DEFAULT_PATH, cache: Optional[dict] = None) -> None:
     if cache is None:
         return
     try:
-        Path(path).write_text(
-            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        with backup.guard(Path(path), "summaries"):
+            Path(path).write_text(
+                json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as e:
         logger.warning("요약 캐시를 저장하지 못했습니다 (%s): %s", path, e)
 
