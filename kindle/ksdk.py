@@ -21,6 +21,26 @@
     annotation_id / book_id / dataset / start_position / end_position
     created_time / modified_time / serialized_payload
 
+## ⚠️ `asin` 은 대부분 ASIN 이 아니다 (이름이 오해를 부른다)
+
+이 모듈이 `asin` 이라 부르는 값은 `payload["book_data"]["asin"]` 이다. 그런데
+이 장서는 **98.5%가 사이드로드(PDOC)** 라, 그 자리에 든 것은 아마존 ASIN 이
+아니라 **기기가 만든 32자 내부 ID** 다. 실측:
+
+    PDOC (사이드로드)  140권 / 3,304건   ← asin 자리 = 기기 내부 ID
+    EBOK (아마존 구매)    7권 /    49건   ← 이 중 3건은 Vera·Font_Calibration
+                                           같은 시스템 항목
+    진짜 ASIN 을 가진 책 = 4권
+
+책을 가르는 **안정적인 키로는 그대로 써도 된다** (같은 책이면 같은 값이다).
+다만 이것을 아마존 ASIN 으로 취급해 외부 조회(표지·메타데이터)에 넘기거나,
+종이책 ISBN 과 잇는 별칭 키로 쓰면 안 된다. 기기 간 동일성도 미검증이다
+(Scribe DB 를 확보해야 확인된다).
+
+`book_id` 컬럼(`ASIN-contentType-guid` 형태)은 **문자열로 파싱하지 말 것.**
+하이픈 개수가 3개/7개로 갈리고 id 자체가 UUID 인 경우가 있어 첫 `-` 로 자르면
+깨진다. payload 의 `book_data` 에 이미 분리돼 있으므로 그쪽을 쓴다.
+
 ## 좌표계 — 중요
 
 `start_position` 의 `shortPosition` 은 **KFX char offset (PRE-KL)** 이다.
@@ -164,7 +184,9 @@ def parse_ksdk_db(db_path: Path,
                   book_title: str = "") -> List[Clipping]:
     """KSDK DB → `Clipping` 목록.
 
-    asin: 주면 그 책만. 없으면 전체.
+    asin: 주면 그 책만. 없으면 전체. (이름과 달리 사이드로드 책에서는 기기
+          내부 ID 다 — 모듈 상단 경고 참조. 키로는 안정적이지만 아마존 ASIN
+          으로 취급하면 안 된다.)
     book_title: `Clipping.book_title` 에 넣을 값. 비어 있으면 ASIN 을 쓴다
                 (호출부가 제목 캐시로 채우는 편이 낫다).
 
