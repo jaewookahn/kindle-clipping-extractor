@@ -76,6 +76,22 @@ def get_cached(cache: dict, kfx_path: Path) -> Optional[dict]:
             "asin": entry.get("asin", "")}
 
 
+def get_stale(cache: dict, kfx_path: Path) -> Optional[dict]:
+    """mtime/size 를 무시하고 이 경로의 캐시 항목을 돌려준다 (없으면 None).
+
+    KFX 를 아예 못 읽을 때의 최후 수단이다. 메타데이터 추출이 실패하면 ASIN 을
+    모르게 되고, ASIN 을 모르면 KSDK 클리핑도 본문 캐시도 찾을 수 없다 —
+    책 하나가 통째로 사라진다. 옛 제목·ASIN 이라도 있는 편이 낫다.
+    (마운트가 죽으면 내용만 못 읽고 stat 은 답하므로 보통은 정상 hit 이 난다.
+     여기까지 오는 건 파일이 교체됐는데 읽히지도 않는 드문 경우다.)
+    """
+    entry = cache.get("books", {}).get(str(kfx_path.resolve()))
+    if not entry:
+        return None
+    return {"title": entry["title"], "author": entry.get("author", ""),
+            "asin": entry.get("asin", "")}
+
+
 def put_cached(cache: dict, kfx_path: Path, title: str, author: str,
                asin: str = "") -> None:
     """캐시에 (title, author, asin) 저장. 파일의 현재 mtime/size 를 같이 기록."""
@@ -112,5 +128,15 @@ def get_or_extract(
     title  = meta.get("title", "") or kfx_path.stem
     author = meta.get("author", "") or ""
     asin   = meta.get("asin", "") or ""
+
+    # 추출이 실패하면 제목이 파일명으로 대체되고 저자·ASIN 이 빈다. 그 결과를
+    # 저장하면 **실패가 캐시에 굳어** 이후 실행이 계속 그 값을 쓴다. 기존에
+    # 제대로 된 항목이 있으면 덮지 않는다.
+    looks_failed = (not asin and not author and title == kfx_path.stem)
+    if looks_failed:
+        prev = get_stale(cache, kfx_path)
+        if prev and (prev.get("asin") or prev.get("author")):
+            logger.warning("메타데이터 추출 실패로 보임 — 기존 캐시 유지 (%s)", kfx_path.name)
+            return prev
     put_cached(cache, kfx_path, title, author, asin)
     return {"title": title, "author": author, "asin": asin}

@@ -84,7 +84,14 @@ from kindle.title_cache import (
     load_cache as load_title_cache,
     save_cache as save_title_cache,
     get_or_extract as get_or_extract_title,
+    get_stale as get_stale_title,
     DEFAULT_PATH as DEFAULT_TITLE_CACHE,
+)
+from kindle.text_cache import (
+    get_or_extract as text_cache_get,
+    cache_key as text_cache_key,
+    has as text_cache_has,
+    DEFAULT_DIR as DEFAULT_TEXT_CACHE,
 )
 
 
@@ -332,6 +339,32 @@ def find_kfx_sdr_pairs(documents: Path) -> list[tuple[Path, Path, str]]:
     ]
 
 
+def _wanted_stems(pairs, args, text_cache_dir: Optional[Path]) -> list[str]:
+    """WiFi 로 본문(KFX)을 받아야 할 책의 stem 목록.
+
+    "본문 캐시가 없는 책"이 대상이다. ASIN 은 제목 캐시에서 꺼내 쓴다 —
+    여기서 KFX 를 새로 열면 지금 받으려는 그 파일을 읽어야 해서 앞뒤가 맞지
+    않는다. ASIN 을 모르면 경로 기반 키로 떨어지는데, 그때는 캐시 hit 가
+    안 나므로 자연히 요청 대상이 된다 (보수적으로 맞는 쪽).
+    """
+    if not args.wifi or args.wifi_kfx <= 0 or text_cache_dir is None:
+        return []
+    from kindle.title_cache import get_cached as _title_cached
+    probe = load_title_cache(Path(args.title_cache))
+    out: list[str] = []
+    for kfx, _sdr, stem in pairs:
+        hit = _title_cached(probe, kfx) or {}
+        try:
+            key = text_cache_key(hit.get("asin", ""), kfx)
+        except ValueError:
+            continue
+        if not text_cache_has(key, text_cache_dir):
+            out.append(stem)
+        if len(out) >= args.wifi_kfx:
+            break
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 단일 책 처리
 # ---------------------------------------------------------------------------
@@ -344,6 +377,9 @@ def process_book(
     pbar: "tqdm",
     title_cache: Optional[dict] = None,
     ksdk_by_asin: Optional[dict] = None,
+    text_cache_dir: Optional[Path] = None,
+    refresh_text: bool = False,
+    allow_empty_text: bool = False,
 ) -> tuple[list[Clipping], list[str], str, str, int, list]:
     """
     YJR 파싱 → 신규 필터 → KFX 메타데이터·텍스트·페이지·KL 번호 채우기.
@@ -369,7 +405,18 @@ def process_book(
 
     def _extract(p: Path) -> dict:
         with _capture_stderr_to_log(file_stem):
-            return extract_kfx_metadata(p)
+            meta = extract_kfx_metadata(p)
+        # KFX 를 못 읽으면 ASIN 이 빈다 (제목은 파일명으로 대체되므로 실패
+        # 신호가 못 된다). ASIN 이 없으면 KSDK 클리핑도 본문 캐시도 못 찾아
+        # 책이 통째로 사라진다. 캐시가 ASIN 을 알고 있으면 그게 더 정확하다 —
+        # 모르는 값을 아는 값으로 덮는 것이므로 안전하다.
+        if title_cache is not None and not meta.get("asin"):
+            stale = get_stale_title(title_cache, p)
+            if stale and stale.get("asin"):
+                logger.warning("[%s] 메타데이터에 ASIN 이 없음 — 캐시 값으로 진행 (%s)",
+                               file_stem, stale["asin"])
+                return stale
+        return meta
 
     if title_cache is not None:
         meta = get_or_extract_title(title_cache, kfx_path, _extract)
@@ -420,15 +467,40 @@ def process_book(
     if not new_clips:
         return [], [], real_title, author, skipped, []
 
-    # 3. KFX 텍스트·페이지·KL 번호 추출
+    # 3. KFX 텍스트·페이지·KL 번호 확보 (캐시 우선)
+    #
+    # 책은 안 변하고 어노테이션만 변한다. 그래서 추출 결과를 ASIN 키로 캐시해
+    # 두면 이후에는 KFX 파일이 없어도 본문을 채울 수 있다 (kindle/text_cache.py).
     pbar.set_postfix_str(f"{real_title[:40]}  KFX 추출", refresh=True)
-    with _capture_stderr_to_log(real_title):
-        page_map, kl_offsets, book_text, toc = extract_kfx_info(kfx_path)
+
+    def _extract_info(p: Path):
+        with _capture_stderr_to_log(real_title):
+            return extract_kfx_info(p)
+
+    if text_cache_dir is not None:
+        (page_map, kl_offsets, book_text, toc), src = text_cache_get(
+            kfx_path, _extract_info, asin=meta.get("asin", ""), title=real_title,
+            refresh=refresh_text, cache_dir=text_cache_dir,
+        )
+        if src == "cache":
+            pbar.set_postfix_str(f"{real_title[:40]}  본문 캐시", refresh=True)
+    else:
+        page_map, kl_offsets, book_text, toc = _extract_info(kfx_path)
 
     if book_text:
         fill_clipping_text(new_clips, book_text)
-    else:
+    elif allow_empty_text:
         logger.warning("[%s] book_text 추출 실패 — 하이라이트 내용이 비어있을 수 있음", real_title)
+    else:
+        # 본문 없이 올리면 위치·시각만 있는 껍데기가 Notion 에 박히고
+        # fingerprint 까지 기록돼 **다시 시도할 수도 없게 된다**
+        # (2026-09-19: 마운트가 죽은 줄 모르고 157건을 그렇게 올렸다).
+        # 조용히 진행하느니 이 책을 건너뛴다. 정말 위치만이라도 필요하면
+        # --allow-empty-text 로 예전 동작을 쓸 수 있다.
+        logger.error("[%s] book_text 를 얻지 못해 이 책을 건너뜁니다 "
+                     "(KFX 를 읽을 수 없고 본문 캐시도 없음). "
+                     "위치만이라도 올리려면 --allow-empty-text", real_title)
+        return [], [], real_title, author, skipped + len(new_clips), []
 
     if page_map:
         fill_clipping_pages(new_clips, page_map)
@@ -566,6 +638,9 @@ def run_pipeline(args) -> int:
 
     seen_keys: Set[str] = set(state.get("seen_keys", []))
 
+    text_cache_dir = (None if args.no_text_cache
+                      else Path(args.text_cache).expanduser())
+
     # ── 3b. KSDK 어노테이션 DB 확보 (WiFi 수신 또는 로컬 파일) ───────────
     #
     # 펌웨어 5.19.x 이후 어노테이션이 .yjr 대신 기기 내부 SQLite 로 간다.
@@ -584,8 +659,15 @@ def run_pipeline(args) -> int:
             from kindle.wifi import WifiReceiver
 
             out_dir = Path(args.state).expanduser().parent / "ksdk_wifi"
+
+            # 본문 캐시가 없는 책은 KFX 도 같이 받아 온다. 기기가
+            # GET /wanted 로 이 목록을 가져가 해당 파일을 밀어 올린다.
+            # 권당 수십 MB 라 --wifi-kfx 로 상한을 둔다 (전권을 한 번에
+            # 요청하면 1GB 를 넘어 제한시간 안에 못 끝낸다).
+            wanted = _wanted_stems(pairs, args, text_cache_dir)
             try:
                 rx = WifiReceiver(out_dir, port=args.wifi_port, bind=args.wifi_bind,
+                                  wanted=wanted,
                                   on_file=lambda n, sz, sha:
                                       print(f"  받음 {n}  {sz:,}B  sha1 {sha[:12]}", flush=True))
             except RuntimeError as e:
@@ -593,7 +675,10 @@ def run_pipeline(args) -> int:
                 return 1
             with rx:
                 print("\nWiFi 수신 대기 중 …")
-                print(f"  기기 스크립트의 PUSH_URL: {rx.url}")
+                print(f"  기기 스크립트의 BASE_URL: {rx.base_url}")
+                if wanted:
+                    print(f"  본문도 요청: {len(wanted)}권 — {', '.join(wanted[:3])}"
+                          f"{' …' if len(wanted) > 3 else ''}")
                 print(f"  기기 홈 화면 검색창에  ;log mrpi  를 입력하세요."
                       f"  (제한 {args.wifi_timeout}초)\n")
                 result = rx.wait(args.wifi_timeout)
@@ -601,6 +686,15 @@ def run_pipeline(args) -> int:
                 print("WiFi 수신 실패 — DB 를 받지 못했습니다.", file=sys.stderr)
                 return 1
             db_path = result.db_path
+
+            # 받은 KFX 가 있으면 그쪽을 본문 소스로 쓴다. 마운트는 내용을
+            # 못 내주면서 stat 만 답하는 일이 있어 (2026-09-19) 신뢰하지 않는다.
+            recv_kfx = {Path(n).stem: out_dir / n
+                        for n in result.files if n.lower().endswith(".kfx")}
+            if recv_kfx:
+                pairs = [(recv_kfx.get(stem, kfx), sdr, stem)
+                         for kfx, sdr, stem in pairs]
+                print(f"  KFX {len(recv_kfx)}권 수신 — 본문은 수신본에서 추출합니다")
 
         ksdk_clips = parse_ksdk_db(db_path)
         ksdk_by_asin = {}
@@ -636,6 +730,9 @@ def run_pipeline(args) -> int:
             new_clips, new_fps, real_title, author, skipped, chapters = process_book(
                 kfx, sdr, stem, effective_seen, pbar, title_cache=title_cache,
                 ksdk_by_asin=ksdk_by_asin,
+                text_cache_dir=text_cache_dir,
+                refresh_text=args.refresh_text,
+                allow_empty_text=args.allow_empty_text,
             )
             flush_book_log()   # 이 책의 누적 경고를 즉시 파일에 기록
             all_new.extend(new_clips)
@@ -836,6 +933,18 @@ def main() -> None:
                         help=f"제목·저자 캐시 경로 (기본값: {DEFAULT_TITLE_CACHE})")
     parser.add_argument("--refresh-titles", action="store_true",
                         help="--titles 캐시를 무시하고 강제 재추출")
+    parser.add_argument("--text-cache", default=str(DEFAULT_TEXT_CACHE), metavar="DIR",
+                        help=f"KFX 본문·목차 캐시 디렉터리 (기본값: {DEFAULT_TEXT_CACHE}). "
+                             "책당 한 번만 추출하고 이후에는 KFX 파일 없이도 본문을 채운다 "
+                             "(권당 약 250KB)")
+    parser.add_argument("--no-text-cache", action="store_true",
+                        help="본문 캐시를 쓰지 않고 매번 KFX 에서 추출")
+    parser.add_argument("--refresh-text", action="store_true",
+                        help="본문 캐시를 무시하고 강제 재추출 (책을 다른 판본으로 교체했을 때)")
+    parser.add_argument("--allow-empty-text", action="store_true",
+                        help="본문 추출에 실패해도 그 책을 건너뛰지 않고 위치·시각만 올린다. "
+                             "기본값은 건너뛰기 — 껍데기를 올리면 fingerprint 가 기록돼 "
+                             "나중에 다시 채울 수 없다")
     parser.add_argument("--book", action="append", default=None, metavar="PATTERN",
                         help="특정 책만 처리 (stem 파일명 substring, 대소문자 무시). "
                              "여러 번 지정 가능: --book A --book B")
@@ -861,6 +970,10 @@ def main() -> None:
                         help="WiFi 수신 포트 (기본값: 8713)")
     parser.add_argument("--wifi-bind", default=None, metavar="ADDR",
                         help="WiFi 수신 바인드 주소 (기본: 자동 감지한 LAN IP)")
+    parser.add_argument("--wifi-kfx", type=int, default=0, metavar="N",
+                        help="본문 캐시가 없는 책의 KFX 를 최대 N권까지 WiFi 로 함께 받는다 "
+                             "(기본 0 = 받지 않음). 권당 수십 MB 라 크게 잡으면 "
+                             "--wifi-timeout 도 함께 올려야 한다")
     parser.add_argument("--wifi-timeout", type=int, default=600, metavar="SEC",
                         help="WiFi 수신 제한시간 (기본값: 600초)")
     parser.add_argument("--ksdk-db", default=None, metavar="FILE",
