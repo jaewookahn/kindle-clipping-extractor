@@ -124,9 +124,15 @@ def test_kindle_requires_loc_start_or_gets_quarantined():
     assert r.key is None and r.needs_review and r.branch == "kindle"
 
 
-def test_paper_requires_page_or_gets_quarantined():
+def test_paper_missing_page_still_gets_a_key():
+    """킨들과 대칭이 아니다 (§7, 2026-09-20 판정) — 처음엔 대칭으로 구현해
+    격리시켰는데 벡터(js-impl)와 갈려 리딩총괄에 보고했고, 종이책은 page 가
+    없어도 본문·태그·챕터가 온전하니(사용자가 직접 찍은 것, 쪽번호 인식만
+    실패) 버리면 §6.4 에 어긋난다는 판정을 받았다. 그래서 page=None 은
+    빈 문자열로 해시해 유효한 키를 내되 needs_review 만 세운다.
+    """
     r = K.compute_clip_key(BK, "highlight", content=LONG, page=None, source="paper")
-    assert r.key is None and r.needs_review and r.branch == "paper"
+    assert r.key is not None and r.needs_review and r.branch == "paper"
 
 
 def test_paper_page_zero_is_not_missing():
@@ -229,17 +235,12 @@ def test_type_is_part_of_the_key():
 _VECTORS = Path.home() / "prj" / "reading_manager" / "fixtures" / "clip_key_vectors.json"
 _VECTOR_SOURCES = ("js-impl", "spec")
 
-# 독립 구현이 실제로 갈린 지점 — 맞추지 않고 보고한다 (리딩총괄2 지시).
-# §7 의 "여전히 유효한 것: Location 없는 클리핑은 Needs Review 로 격리"를
-# 킨들의 loc_start 에 대한 문장으로 읽고, 종이책 page 에도 대칭 적용했다
-# (없으면 격리). 벡터(js-impl)는 과거 관례(`page != null ? String(page) : ''`)
-# 를 그대로 유지해 page=None 도 빈 문자열로 해시 — 유효한 키가 나온다.
-# 어느 쪽이 사양의 의도인지 §7 에 명시가 없어 판단을 못 받았다.
-_KNOWN_DIVERGENCE = {
-    "p-page-null": "page=None 처리 — 격리(이 구현) vs 빈 문자열로 해시(벡터). "
-                  "§7 이 '없으면 격리'를 킨들 loc_start 로만 명시하고 종이책 "
-                  "page 는 언급이 없어 갈렸다. 리딩총괄 판단 대기.",
-}
+# 독립 구현이 실제로 갈렸던 지점 (해결됨) — 처음엔 §7 의 "Location 없는
+# 클리핑은 Needs Review 로 격리"를 종이책 page 에도 대칭 적용해 page=None
+# 을 격리시켰다. 벡터(js-impl)는 과거 관례(`page != null ? String(page) : ''`)
+# 를 유지해 빈 문자열로 해시한 유효한 키를 냈다 — 여기서 갈려 리딩총괄에
+# 보고했고(맞추지 않음), "종이책은 대칭이 아니다"는 판정을 받아 §7 이
+# 개정됐다(2026-09-20, 커밋 3790836). 이제 이 구현도 벡터와 같다.
 
 
 def _vector_cases():
@@ -273,7 +274,4 @@ def test_shared_vector(v):
     (지시 — "어느 쪽이 틀렸는지 저에게 올리십시오, 맞추지 마십시오").
     """
     assert v.get("source") in _VECTOR_SOURCES, f"모르는 source: {v.get('source')}"
-    reason = _KNOWN_DIVERGENCE.get(v.get("id"))
-    if reason:
-        pytest.xfail(reason)
     assert _eval_vector(v) == v["expected"]

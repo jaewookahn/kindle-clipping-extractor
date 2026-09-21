@@ -183,11 +183,23 @@ def compute_clip_key(
         킨들    sha1(book_key | type | loc_start | content_norm)   ※ POST-KL
         종이책  sha1(book_key | type | page | content_norm)
 
-    좌표(`loc_start`/`page`)가 없으면 키를 만들지 않고 Needs Review 로
-    격리한다 — 본문만으로는 "같은 문장을 여러 곳에서 하이라이트"를
-    구분할 수 없어서다. `loc_end` 는 갈래 어디에도 들어가지 않는다
-    (모듈 docstring "loc_end 는 키에 넣지 않는다" 참조) — 호출부가
-    `Location End` 속성·`Positions` 보존에만 별도로 쓴다.
+    좌표가 없을 때 두 소스는 **대칭이 아니다** (§7, 2026-09-20 판정):
+
+    - 킨들: `loc_start` 가 없으면 키를 만들지 않고 Needs Review 로 격리한다.
+      Location 이 없다는 건 KFX 가 없다는 뜻이라 본문도 못 채워 어차피
+      §6.1.1 가드에 걸린다 — 버릴 것을 버리는 셈이다
+    - 종이책: `page` 가 없어도 빈 문자열로 해시해 **유효한 키를 낸다** —
+      본문·태그·챕터는 온전하고(사용자가 직접 찍은 것) 쪽번호 인식만
+      실패한 경우라, 버리면 §6.4 원칙에 어긋난다. 다만 needs_review 는 선다
+
+    `loc_end` 는 갈래 어디에도 들어가지 않는다 (모듈 docstring "loc_end 는
+    키에 넣지 않는다" 참조) — 호출부가 `Location End` 속성·`Positions`
+    보존에만 별도로 쓴다.
+
+    ⚠️ 미결 사안(§7 기록, 여기서 손대지 않음): `page` 가 이제 키에 들어가서
+    킨들에는 없던 문제가 생겼다 — 종이책 `page` 는 사용자 입력값이라 나중에
+    고칠 수 있고, 고치면 키가 바뀌어 중복이 생긴다. Location 은 기기가
+    정하므로 이런 일이 없다. 줄줄이 Clippings DB 전환 때 다룬다.
 
     북마크(본문 없음)도 특례가 아니다 — `content` 를 안 주면 `content_norm`
     이 자연히 빈 문자열이 되어 `sha1(book_key|bookmark|loc_start|"")` 로
@@ -202,10 +214,16 @@ def compute_clip_key(
     norm = normalize_content(content)
 
     if source == "paper":
-        if page is None:
-            return ClipKey(None, "paper", needs_review=True)
-        key = _sha1(f"{bk}|{clip_type}|{page}|{norm}")
-        return ClipKey(key, "paper", needs_review=truncated)
+        # 킨들과 대칭이 아니다 (§7, 2026-09-20 판정). 킨들에서 loc_start 가
+        # 없다는 건 KFX 가 없다는 뜻이라 본문도 못 채워 §6.1.1 가드에 이미
+        # 걸린다 — 버릴 것을 버리는 셈이다. 종이책은 page 가 없어도 본문·
+        # 태그·챕터가 온전하다(사용자가 직접 찍은 것이고 쪽번호 인식만
+        # 실패한 것) — 버리면 §6.4 원칙에 어긋난다. 그래서 page 가 없으면
+        # 빈 문자열로 해시하고 needs_review 만 세운다.
+        needs_review = truncated or page is None
+        page_part = "" if page is None else str(page)
+        key = _sha1(f"{bk}|{clip_type}|{page_part}|{norm}")
+        return ClipKey(key, "paper", needs_review=needs_review)
 
     if loc_start is None:
         return ClipKey(None, "kindle", needs_review=True)
