@@ -22,8 +22,23 @@ JS 정본:  `~/prj/highlight-capture/src/utils/{bookKey,clipKey}.js`
 
 같은 클리핑이 파이썬과 JS 에서 다른 키를 얻으면 통합 DB 에서 갈라진다. 그래서
 **JS 동작을 그대로 옮긴다 — 개선하지 않는다.** 눈에 거슬리는 부분이 있어도
-(예: `normalize_for_key` 가 하이픈에서 제목을 자르는 것) JS 를 먼저 고치고 함께
-바꿔야 한다. 공유 검증 벡터는 `~/prj/reading_manager/fixtures/clip_key_vectors.json`.
+(예: `normalize_for_key` 가 하이픈에서 제목을 자르는 것 — 보류 중인 저자 토큰
+정렬 작업에 묶여 있다) JS 를 먼저 고치고 함께 바꿔야 한다. 공유 검증 벡터는
+`~/prj/reading_manager/fixtures/clip_key_vectors.json`.
+
+**예외 둘 — 사양이 구현보다 먼저 옳았던 경우** (`DATA_MODEL.md` §7,
+2026-09-20 명시, 커밋 `b877420`). 최초 이식 때 JS `clipKey.js` 를 그대로
+옮겼더니 벡터 생성 과정에서 둘 다 사양과 어긋난 것이 드러났다 — 그래서
+**여기서는 사양대로 고쳤고, `줄줄이`가 같은 규칙으로 JS 를 맞추는 중이다**:
+
+1. **색상태그 제거는 `content_norm` 의 첫 단계다.** 원래 JS 에는 이 단계가
+   없어 `"[yellow] 안녕"` 이 `"yellow안녕"` 이 됐다 — 대괄호만 문장부호로
+   빠지고 색상 이름이 본문에 섞여 들었다. 색상 접두는 소스마다 다르므로
+   (킨들 갈래는 접두, 종이책은 없음) 남겨 두면 "본문으로 신원을 잡는다"는
+   설계가 소스별로 다른 키를 내며 무너진다. 사양이 정한 색은 **yellow·blue·
+   pink·orange 넷, 대소문자 무시** — 이 목록은 JS 와 반드시 같아야 한다
+2. **비어 있는 자리는 빈 문자열이다.** `loc_end=None` 등을 해시 입력에 넣을 때
+   `"None"`/`"null"` 문자열이 아니라 `""` 다.
 
 ## 좌표계 주의
 
@@ -54,7 +69,16 @@ SHORT_TEXT_THRESHOLD = 20
 
 # 킨들 하이라이트 본문은 "[yellow] 실제 문장" 처럼 색상 접두사가 붙는다
 # (`kindle/ksdk.py`, `parsers/yjr.py`). 색을 바꿨다고 다른 클리핑이 되면 안 된다.
-_COLOR_TAG = re.compile(r"^\s*\[[^\]\n]{1,24}\]\s*")
+#
+# DATA_MODEL.md §7 (2026-09-20 명시)이 정한 색상 넷: yellow·blue·pink·orange,
+# 대소문자 무시. 선행 토큰 **하나**만 떼고, 본문 중간의 대괄호나 "[1]" 같은
+# 각주 표시는 건드리지 않는다 — 그래서 임의 대괄호가 아니라 이 네 단어만 매칭한다.
+#
+# ⚠️ 실측 불일치: KSDK DB(`kindle/ksdk.py`)가 실제로 내보내는 값은 "dark_blue"
+# 이지 "blue"가 아니다 (`tests/test_ksdk.py` 참조). 이 목록대로면 그 태그는
+# 안 벗겨진다 — 사양이 준 목록을 그대로 따랐고, JS 와 다르게 임의로 늘리지
+# 않았다. 리딩총괄에 보고했다.
+_COLOR_TAG = re.compile(r"^\s*\[(?:yellow|blue|pink|orange)\]\s*", re.IGNORECASE)
 
 _PAREN_NOTE = re.compile(r"[（(][^）)]*[）)]")
 # JS: n.split(/[:：–—-]/)[0] — 하이픈도 분리자다. 이상해 보여도 그대로 둔다.

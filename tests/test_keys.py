@@ -48,14 +48,32 @@ def test_normalize_content(raw, want):
     assert K.normalize_content(raw) == want
 
 
-def test_color_tag_is_stripped():
-    """색을 바꿨다고 다른 클리핑이 되면 안 된다."""
-    assert K.normalize_content("[yellow] 본문입니다") == K.normalize_content("본문입니다")
-    assert K.normalize_content("[dark_blue] 본문입니다") == K.normalize_content("본문입니다")
+@pytest.mark.parametrize("color", ["yellow", "blue", "pink", "orange",
+                                   "YELLOW", "Blue", "PiNk"])
+def test_color_tag_is_stripped(color):
+    """색을 바꿨다고 다른 클리핑이 되면 안 된다. 사양이 정한 4색, 대소문자 무시."""
+    assert K.normalize_content(f"[{color}] 본문입니다") == K.normalize_content("본문입니다")
 
 
 def test_only_leading_tag_is_stripped():
     assert "각주" in K.normalize_content("[yellow] 본문 [각주] 계속")
+
+
+def test_mid_content_brackets_are_not_treated_as_color_tags():
+    """본문 중간의 각주 표시나 대괄호는 색상 태그가 아니다 — 건드리지 않는다."""
+    assert K.normalize_content("본문 [1] 계속") == K.normalize_content("본문[1]계속")
+
+
+def test_dark_blue_is_not_in_the_spec_color_set():
+    """⚠️ 실측 불일치: KSDK DB(kindle/ksdk.py)는 실제로 "dark_blue"를 내보내는데
+    (tests/test_ksdk.py 참조) 사양(DATA_MODEL.md §7)이 정한 색상 넷은
+    yellow·blue·pink·orange 뿐이라 "dark_blue"는 포함되지 않는다. 사양을
+    임의로 늘리지 않고 그대로 따랐다 — "dark_blue" 태그는 안 벗겨진다.
+    """
+    stripped = K.normalize_content("[dark_blue] 본문입니다")
+    bare = K.normalize_content("본문입니다")
+    assert stripped != bare
+    assert "darkblue" in stripped
 
 
 # --------------------------------------------------------------------------
@@ -154,6 +172,16 @@ def test_bookmark_loc_end_is_normalized_away():
 def test_bookmark_ignores_any_loc_end():
     a = K.clip_key(BK, "bookmark", loc_start=5000, loc_end=9999)
     assert a == K.clip_key(BK, "bookmark", loc_start=5000)
+
+
+def test_missing_value_renders_as_empty_string_not_literal_none():
+    """DATA_MODEL.md §7 (2026-09-20 명시): 빈 자리는 "" 다. "None"·"null" 아니다."""
+    import hashlib
+    want = hashlib.sha1(f"{BK}|bookmark|5000|".encode("utf-8")).hexdigest()
+    assert K.clip_key(BK, "bookmark", loc_start=5000, loc_end=None) == want
+    # "None" 문자열을 넣은 것과는 달라야 한다 — 그게 회귀다
+    wrong = hashlib.sha1(f"{BK}|bookmark|5000|None".encode("utf-8")).hexdigest()
+    assert K.clip_key(BK, "bookmark", loc_start=5000, loc_end=None) != wrong
 
 
 def test_bookmark_ignores_content():
