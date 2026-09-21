@@ -461,19 +461,26 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q -p no:warnings
 | `APNXInfo.asin` / `page_count` 미활용 | Book 메타로 반영 (ASIN은 종이책 ISBN과 잇는 별칭 키) |
 | KSDK 파서(`kindle/ksdk.py`)의 `book_id`(ASIN-contentType-guid) 미노출 | `Devices` 속성 재료 — 파서가 이미 읽고 있으니 필드만 늘리면 됨 |
 
-### ⚠️ 통합을 막고 있는 것 — `source_file` 이 지워진다
+### `source_file` strip 해제 완료 — 그래도 삭제 탐지는 여전히 금지
 
-`kindle/exporters.py` 의 `sync_export_json_grouped()` 가 `strip = ("book_title", "author",
-"source_file")` 로 **`source_file` 을 제거**한다. 그 결과 내보낸 JSON에 **기기를 식별할
-근거가 전혀 없다.**
+(2026-09-20) `kindle/exporters.py` 의 `sync_export_json_grouped()` 가
+`strip = ("book_title", "author", "source_file")` 로 **`source_file` 까지 제거**
+하고 있었다. `book_title`·`author` 는 책 단위로 이미 있어 반복을 없앤 것이지만,
+`source_file` 을 같이 지우면 내보낸 JSON에 **기기를 식별할 근거가 전혀 없어졌다.**
+`strip` 에서 `source_file` 을 뺐다 — 이제 각 클리핑에 YJR 사이드카 경로 또는
+KSDK DB 경로가 그대로 남는다.
 
-이것이 막고 있는 것:
-- **삭제 탐지**. `My Clippings.txt` 에는 있는데 같은 기기의 YJR 현재 상태에 없으면 삭제된
-  것이지만, 기기를 구분하지 못하면 *다른 기기에서 읽은 멀쩡한 클리핑*을 삭제로 오판한다
-- 통합 DB의 `Devices` 속성
+🔴 **이것은 삭제 탐지의 선결 조건일 뿐 허가가 아니다. 삭제 탐지는 여전히 금지다:**
+- KSDK 에도 **클리핑별** 기기 정보가 없다 (`device_name` 은 `last_read` 전용,
+  하이라이트·북마크·노트에는 0건 — 위 "흔한 오해" 참조)
+- "YJR 현재 상태"라는 개념이 2026-08-25 이후 무의미해졌다 (KSDK 저장소 이전)
+- **기기 식별자를 반입 시점에 주입하는 설계 자체가 미해결**이다
+  (`~/prj/reading_manager/DATA_MODEL.md` §9.1). `source_file` 원시 경로를
+  그대로 `Devices` 속성에 쓸 수는 없다 — 마운트 경로·계정 폴더명이 기기별로
+  들쭉날쭉해 정규화가 필요하다.
 
-→ 통합 Phase 4에서 `source_file` 을 strip 목록에서 빼거나 `device` 필드를 신설해야 한다.
-   **그 전까지 삭제 탐지를 구현하면 안 된다.**
+→ 다음 단계(주입 설계)는 이 저장소가 독단으로 정하지 않는다. `reading_manager`
+  총괄에게 안을 올린 뒤 진행한다.
 
 ### My Clippings.txt 는 현재 상태가 아니라 편집 이력 로그다
 

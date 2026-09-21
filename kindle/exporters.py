@@ -132,7 +132,15 @@ def sync_export_json_grouped(clippings: List[Clipping], out: Path, meta: dict,
     chapters_by_book 가 있으면 각 책에 "chapters" (챕터별 페이지·Location
     범위) 를 넣는다. 클리핑을 나중에 정리할 때 어느 장에 속하는지 되짚는 근거.
     """
-    strip = ("book_title", "author", "source_file")
+    # book_title·author 는 책 단위로 이미 위에 있으므로 클리핑마다 반복하지
+    # 않는다. source_file 은 **지우지 않는다** — 기기(YJR 사이드카 경로,
+    # KSDK DB 경로)를 식별할 유일한 흔적이라, 지우면 삭제 탐지·`Devices`
+    # 속성이 원천 봉쇄된다 (CLAUDE.md "통합을 막고 있는 것" 참조).
+    # ⚠️ 그렇다고 삭제 탐지를 구현해도 된다는 뜻은 아니다 — 여전히 금지다.
+    # KSDK 클리핑별 기기 정보 부재, "YJR 현재 상태" 개념이 08-25 이후 무의미
+    # 등 다른 사유가 그대로 남아 있다. 기기 식별자를 반입 시점에 주입하는
+    # 설계도 미해결이다 (`~/prj/reading_manager/DATA_MODEL.md` §9.1).
+    strip = ("book_title", "author")
     books: dict[str, dict] = {}
     for c in clippings:
         if c.book_title not in books:
