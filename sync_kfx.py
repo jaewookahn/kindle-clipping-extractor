@@ -94,6 +94,7 @@ from kindle.text_cache import (
     has as text_cache_has,
     DEFAULT_DIR as DEFAULT_TEXT_CACHE,
 )
+from kindle.ksdk_staleness import check as check_ksdk_staleness
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +716,20 @@ def run_pipeline(args) -> int:
             ksdk_by_asin.setdefault(c.book_title, []).append(c)   # 제목 채우기 전엔 ASIN
         print(f"KSDK DB: {db_path}")
         print(f"  클리핑 {len(ksdk_clips)}개 / 책 {len(ksdk_by_asin)}권")
+
+        # staleness 방어 — 옛 사본을 새 것으로 착각해 조용히 반입하는 것을 막는다.
+        # 로컬 파일 mtime 은 못 믿는다(SYMLINK_STALENESS_REVIEW.md §3 실측 —
+        # WiFi PUT 은 수신 시각으로 새로 쓰고, MTP 다운로드도 원본
+        # modificationdate 를 안 맞춘다). 판단 로직은 kindle/ksdk_staleness.py.
+        newest_ksdk_date = max((c.added_date for c in ksdk_clips if c.added_date),
+                              default=None)
+        if newest_ksdk_date:
+            print(f"  최신 어노테이션: {newest_ksdk_date}")
+        ksdk_sha1 = hashlib.sha1(db_path.read_bytes()).hexdigest()
+        staleness = check_ksdk_staleness(state.get("last_ksdk_db"), ksdk_sha1, newest_ksdk_date)
+        for w in staleness.warnings:
+            print(f"  [경고] {w}")
+        state["last_ksdk_db"] = staleness.record
 
     # ── 4. 책별 처리 (progress bar) ──────────────────────────────────────
     all_new: list[Clipping] = []
