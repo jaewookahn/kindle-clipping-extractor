@@ -15,38 +15,49 @@ JS 정본:  `~/prj/highlight-capture/src/utils/{bookKey,clipKey}.js`
 로 절대 안 맞는다 — **소스가 다르면 중복 제거가 통째로 안 된다.** 종이책(줄줄이)
 까지 합치면 좌표가 아예 없는 소스가 하나 더 는다.
 
-해법은 좌표 대신 **본문**으로 잇는 것이다. 20자 이상이면 내용만 해시하므로
-판본·좌표계·소스가 달라도 같은 문장은 같은 키가 된다.
+## 키 설계 이력 — 본문만으로는 부족했다
 
-## JS 와 한 글자도 다르면 안 된다
+최초 판(2026-09-20)은 20자 이상이면 **좌표를 빼고 내용만** 해싱했다 — 판본·
+좌표계·소스가 달라도 같은 문장이면 같은 키가 되도록. 그런데 이러면 **같은
+문장을 책의 여러 곳에서 하이라이트했을 때 구분이 안 된다** (같은 날 다른
+페이지에서 같은 명언을 두 번 밑줄 그은 경우 등). 사용자 결정으로 **좌표를
+신원에 도로 넣었다** — Location 이 갈릴 정도면 그건 키 설계가 아니라 판본
+관리 문제로 본다.
 
-같은 클리핑이 파이썬과 JS 에서 다른 키를 얻으면 통합 DB 에서 갈라진다. 그래서
-**JS 동작을 그대로 옮긴다 — 개선하지 않는다.** 눈에 거슬리는 부분이 있어도
-(예: `normalize_for_key` 가 하이픈에서 제목을 자르는 것 — 보류 중인 저자 토큰
-정렬 작업에 묶여 있다) JS 를 먼저 고치고 함께 바꿔야 한다. 공유 검증 벡터는
-`~/prj/reading_manager/fixtures/clip_key_vectors.json`.
+**`loc_end` 는 키에 넣지 않는다.** 실측(`LOC_END_CHECK.md`) 결과 킨들 내부
+두 PRE-KL 소스(KSDK↔YJR)는 1,487/1,487 완전 일치했지만, POST-KL 변환본과
+`My Clippings.txt` 사이에서는 3,421쌍 중 35건(1.0%)이 어긋났다 — 무작위가
+아니라 **하이라이트가 마침표로 끝나는 경계**에 94% 가 쏠렸고 값도 -1/-2 로
+갈려 상수 보정도 안 된다. 게다가 넣어서 얻는 게 없다 — `loc_start` 가 같은데
+`loc_end` 만 다르면 그건 길이가 다르다는 뜻이라 `content_norm` 이 이미
+다르므로 구분은 `loc_end` 없이도 된다. 위험만 있고 이득이 없어 뺐다.
+`loc_end` 자체는 `Location End` 속성과 `Positions` 에 계속 보존한다 — 키
+계산에만 안 쓴다.
 
-**예외 둘 — 사양이 구현보다 먼저 옳았던 경우** (`DATA_MODEL.md` §7,
-2026-09-20 명시, 커밋 `b877420`). 최초 이식 때 JS `clipKey.js` 를 그대로
-옮겼더니 벡터 생성 과정에서 둘 다 사양과 어긋난 것이 드러났다 — 그래서
-**여기서는 사양대로 고쳤고, `줄줄이`가 같은 규칙으로 JS 를 맞추는 중이다**:
+이 개정으로 **다섯 갈래가 둘로 줄었다**: 20자 임계(과거 ①②③ 분기), 북마크
+특례(과거 ④ — `loc_end` 를 키에서 뺐으니 본문 없는 클리핑도 그냥
+`content_norm=""` 인 같은 식으로 흡수된다), 절단 특례(과거 ⑤ — 복구 성공
+이면 본문이 같아져 자동으로 원문과 한 키, 실패하면 본문이 달라 자동으로
+다른 키가 되어 "절대 병합 금지"를 따로 명시할 필요가 없다)가 전부 사라졌다.
 
-1. **색상태그 제거는 `content_norm` 의 첫 단계다.** 원래 JS 에는 이 단계가
-   없어 `"[yellow] 안녕"` 이 `"yellow안녕"` 이 됐다 — 대괄호만 문장부호로
-   빠지고 색상 이름이 본문에 섞여 들었다. 색상 접두는 소스마다 다르므로
-   (킨들 갈래는 접두, 종이책은 없음) 남겨 두면 "본문으로 신원을 잡는다"는
-   설계가 소스별로 다른 키를 내며 무너진다. **화이트리스트가 아니라
-   패턴으로 뗀다** — 처음엔 4색(yellow·blue·pink·orange) 목록이었지만
-   실측(`COLOR_CENSUS.json`)이 `dark_blue`·`green` 을 더 찾아내 뒤집혔다.
-   목록은 파서가 고정 어휘를 안 쓰는 한 계속 샌다. 상세 근거는 아래
-   `_COLOR_TAG` 주석 참조 — 이 패턴은 JS 와 반드시 같아야 한다
-2. **비어 있는 자리는 빈 문자열이다.** `loc_end=None` 등을 해시 입력에 넣을 때
-   `"None"`/`"null"` 문자열이 아니라 `""` 다.
+## 이번 구현은 JS 를 보지 않고 사양만으로 한다
+
+지난 번(색상태그 제거)까지는 "JS 를 그대로 옮긴다"는 원칙이었지만, 이번
+개정은 **반대로 지시됐다** — 사양(§7)만 보고 독립적으로 구현한 뒤 공유
+벡터로 대조한다. JS 를 베끼면 JS 의 오해까지 그대로 옮겨 와 벡터 검증이
+"같은 걸 두 번 확인"하는 셈이 되기 때문이다. 독립 구현 둘이 같은 벡터에서
+같은 결론에 도달해야 진짜 검증이다. **어긋나면 어느 쪽이 틀렸는지 리딩총괄에
+올린다 — 이쪽에서 맞추지 않는다.**
+
+`normalize_for_key`·`normalize_content`(색상태그 패턴 포함)·`book_key` 는
+이 원칙이 생기기 전에 이미 JS 실행 결과·전수조사·공유 벡터 세 번으로 독립
+검증됐으므로 그대로 둔다. 이번에 사양만 보고 새로 쓰는 것은 `compute_clip_key`
+뿐이다.
 
 ## 좌표계 주의
 
-②④⑤ 갈래는 **POST-KL Location** 을 받는다. `fill_clipping_kindle_locations()`
-이전의 PRE-KL char offset 을 넣으면 `My Clippings.txt` 쪽과 또 갈라진다.
+`loc_start` 는 **POST-KL Location** 이어야 한다. `fill_clipping_kindle_locations()`
+이전의 PRE-KL char offset 을 넣으면 `My Clippings.txt` 쪽과 갈라진다.
 """
 
 from __future__ import annotations
@@ -58,7 +69,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 __all__ = [
-    "SHORT_TEXT_THRESHOLD",
     "normalize_for_key",
     "normalize_content",
     "strip_color_tag",
@@ -67,8 +77,6 @@ __all__ = [
     "compute_clip_key",
     "ClipKey",
 ]
-
-SHORT_TEXT_THRESHOLD = 20
 
 # 킨들 하이라이트 본문은 "[yellow] 실제 문장" 처럼 색상 접두사가 붙는다
 # (`kindle/ksdk.py`, `parsers/yjr.py`). 색을 바꿨다고 다른 클리핑이 되면 안 된다.
@@ -82,7 +90,7 @@ SHORT_TEXT_THRESHOLD = 20
 # 자체가 틀린 접근이라는 것 — `kindle/ksdk.py` 가 `mchl_color` 값을 그대로
 # 조립해 태그를 만들고(`f"[{color}] "`), `parse_yjr()` 도 페이로드의 색상
 # 문자열을 그대로 읽는다. **어느 파서도 고정 어휘를 쓰지 않으므로** 새 색이
-# 생기면(펌웨어 업데이트·다른 기기) 화이트리스트는 계속 샌다.
+# 생기면(펌웨어 업데이트·다른 기기 종류) 화이트리스트는 계속 샌다.
 #
 # 그래서 **패턴으로 뗀다** — 태그는 우리 파서가 만든 것이라 모양(대괄호+영문
 # 단어)을 안다. 선행 위치에서 **한 번만**, 알파벳으로 시작하는 토큰만 문다.
@@ -96,7 +104,8 @@ SHORT_TEXT_THRESHOLD = 20
 _COLOR_TAG = re.compile(r"^\[[A-Za-z][A-Za-z_]*\]\s?")
 
 _PAREN_NOTE = re.compile(r"[（(][^）)]*[）)]")
-# JS: n.split(/[:：–—-]/)[0] — 하이픈도 분리자다. 이상해 보여도 그대로 둔다.
+# JS: n.split(/[:：–—-]/)[0] — 하이픈도 분리자다. 이상해 보여도 그대로 둔다
+# (저자 토큰 정렬 작업에 묶인 보류 사안 — DATA_MODEL.md §7).
 _SUBTITLE_SEP = re.compile(r"[:：–—-]")
 _NON_ISBN = re.compile(r"[^0-9Xx]")
 
@@ -106,10 +115,7 @@ def _sha1(s: str) -> str:
 
 
 def normalize_for_key(s: Optional[str]) -> str:
-    """제목·저자 정규화. JS `normalizeForKey` 와 동일.
-
-    NFKC → 소문자 → 괄호 주석 제거 → 부제 분리자 이후 절단 → 공백 제거.
-    """
+    """제목·저자 정규화. NFKC → 소문자 → 괄호 주석 제거 → 부제 분리자 이후 절단 → 공백 제거."""
     if not s:
         return ""
     n = unicodedata.normalize("NFKC", s).lower()
@@ -127,11 +133,7 @@ def strip_color_tag(s: Optional[str]) -> str:
 
 
 def normalize_content(s: Optional[str]) -> str:
-    """본문 정규화. JS `normalizeContent` + 색상 태그 제거 (사양 §7).
-
-    JS 는 `/[\\s\\p{P}\\p{S}]/gu` 를 쓴다. 파이썬 `re` 에는 `\\p{...}` 가 없어
-    유니코드 카테고리로 같은 집합을 만든다 — P(구두점)·S(기호)·공백.
-    """
+    """본문 정규화 — 색상태그 제거 → NFKC → 소문자 → 공백·문장부호 제거 (사양 §7)."""
     if not s:
         return ""
     n = unicodedata.normalize("NFKC", strip_color_tag(s)).lower()
@@ -143,7 +145,7 @@ def normalize_content(s: Optional[str]) -> str:
 
 def book_key(title: str = "", author: str = "",
              isbn: str = "", asin: str = "") -> str:
-    """`isbn:` → `asin:` → `t:` 순. JS `computeBookKey` 와 동일.
+    """`isbn:` → `asin:` → `t:` 순.
 
     ⚠️ KSDK 의 `book_data.asin` 은 **대부분 진짜 ASIN 이 아니다** (사이드로드
     98.5%, 기기 생성 32자 내부 ID). 종이책 ISBN 과 잇는 별칭 키로 쓰면 안 되므로
@@ -163,13 +165,8 @@ def book_key(title: str = "", author: str = "",
 class ClipKey:
     """`key` 가 None 이면 키를 만들 수 없다 — Needs Review 로 격리한다."""
     key: Optional[str]
-    branch: str                 # "1".."5"
+    branch: str                 # "kindle" | "paper"
     needs_review: bool = False
-
-
-def _join(*parts) -> str:
-    """JS 와 같은 방식으로 잇는다 — None 은 빈 문자열 (`page != null ? … : ''`)."""
-    return "|".join("" if p is None else str(p) for p in parts)
 
 
 def compute_clip_key(
@@ -178,38 +175,42 @@ def compute_clip_key(
     content: str = "",
     page: Optional[int] = None,
     loc_start: Optional[int] = None,
-    loc_end: Optional[int] = None,
     source: str = "kindle",          # "kindle" | "paper"
-    truncated: bool = False,         # 한도 절단 & 복구 실패
+    truncated: bool = False,         # 한도 절단 & 복구 실패 — Needs Review 표시용
 ) -> ClipKey:
-    """사양 §7 의 5갈래. `loc_*` 은 **POST-KL Location** 이어야 한다."""
+    """사양 §7 (2026-09-20 개정, 두 갈래).
+
+        킨들    sha1(book_key | type | loc_start | content_norm)   ※ POST-KL
+        종이책  sha1(book_key | type | page | content_norm)
+
+    좌표(`loc_start`/`page`)가 없으면 키를 만들지 않고 Needs Review 로
+    격리한다 — 본문만으로는 "같은 문장을 여러 곳에서 하이라이트"를
+    구분할 수 없어서다. `loc_end` 는 갈래 어디에도 들어가지 않는다
+    (모듈 docstring "loc_end 는 키에 넣지 않는다" 참조) — 호출부가
+    `Location End` 속성·`Positions` 보존에만 별도로 쓴다.
+
+    북마크(본문 없음)도 특례가 아니다 — `content` 를 안 주면 `content_norm`
+    이 자연히 빈 문자열이 되어 `sha1(book_key|bookmark|loc_start|"")` 로
+    좌표만으로 유일해진다.
+
+    `truncated=True`(한도 절단 후 복구 실패)는 해시 공식을 바꾸지 않는다.
+    잘린 본문 자체가 `content_norm` 을 원문과 다르게 만들어 자동으로 다른
+    키가 되므로, "원문과 병합 금지"를 따로 코드로 강제할 필요가 없다 —
+    `needs_review` 플래그로 사람이 살펴보라는 표시만 남긴다.
+    """
     bk = bk or ""
-
-    # ④ 북마크 — 본문이 없다. loc_end 는 소스가 무엇을 주든 None 으로 정규화한다.
-    #    KSDK 는 end == start 로 채우고 parse_yjr() 은 None 을 둔다. 맞추지 않으면
-    #    이미 동기화한 북마크가 전부 신규로 오인된다 (실측 12건).
-    if clip_type == "bookmark":
-        if loc_start is None:
-            return ClipKey(None, "4", needs_review=True)
-        return ClipKey(_sha1(_join(bk, "bookmark", loc_start, None)), "4")
-
     norm = normalize_content(content)
 
-    # ⑤ 절단 & 복구 실패 — ② 와 같은 식이지만 ① 과 절대 병합하지 않는다.
-    if truncated:
-        return ClipKey(_sha1(_join(bk, clip_type, loc_start, loc_end)),
-                       "5", needs_review=True)
-
-    # ① 내용만으로 유일 — 소스·판본·좌표계를 가로질러 이어지는 유일한 경로
-    if len(norm) >= SHORT_TEXT_THRESHOLD:
-        return ClipKey(_sha1(_join(bk, clip_type, norm)), "1")
-
-    # ③ 종이책 — Location 이 없다. page 가 유일한 좌표
     if source == "paper":
-        return ClipKey(_sha1(_join(bk, clip_type, page, norm)), "3")
+        if page is None:
+            return ClipKey(None, "paper", needs_review=True)
+        key = _sha1(f"{bk}|{clip_type}|{page}|{norm}")
+        return ClipKey(key, "paper", needs_review=truncated)
 
-    # ② 킨들 짧은 본문 — 내용만으로는 충돌한다 (2자 이하가 기기별 12~25%)
-    return ClipKey(_sha1(_join(bk, clip_type, loc_start, loc_end)), "2")
+    if loc_start is None:
+        return ClipKey(None, "kindle", needs_review=True)
+    key = _sha1(f"{bk}|{clip_type}|{loc_start}|{norm}")
+    return ClipKey(key, "kindle", needs_review=truncated)
 
 
 def clip_key(*args, **kwargs) -> Optional[str]:
