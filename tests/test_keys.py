@@ -224,25 +224,52 @@ def test_truncated_uses_same_formula_as_branch2():
 
 _VECTORS = Path.home() / "prj" / "reading_manager" / "fixtures" / "clip_key_vectors.json"
 
+# 실제 스키마 (줄줄이 세션이 생성). 이전 판은 스키마를 추측해 넣은 것이라 파일이
+# 도착한 뒤 실물 구조({"vectors": [{"section", "id", "input", "expected"}, …]})에
+# 맞춰 다시 썼다. `section` 접두로 어느 함수를 태울지 정한다 — book_key.* /
+# content_norm / clip_key.branch{1..5}_*.
+_VECTOR_SOURCES = ("js-impl", "spec")   # 둘 다 정본 — js-impl 은 실행 결과, spec 은 식 유도
+
+
+def _vector_cases():
+    if not _VECTORS.exists():
+        return []
+    data = json.loads(_VECTORS.read_text(encoding="utf-8"))
+    return data.get("vectors", [])
+
+
+def _eval_vector(v: dict):
+    section, inp = v["section"], v["input"]
+    if section.startswith("book_key"):
+        return K.book_key(title=inp.get("title", ""), author=inp.get("author", ""),
+                          isbn=inp.get("isbn", ""), asin=inp.get("asin", ""))
+    if section == "content_norm":
+        return K.normalize_content(inp.get("text"))
+    if section.startswith("clip_key"):
+        kwargs = dict(
+            bk=inp.get("bookKey", ""),
+            clip_type=inp.get("type", "highlight"),
+            content=inp.get("text", "") or "",
+            page=inp.get("page"),
+            loc_start=inp.get("locStart"),
+            loc_end=inp.get("locEnd"),
+        )
+        if "_paper_" in section:
+            kwargs["source"] = "paper"
+        if section.endswith("branch5_truncated"):
+            kwargs["truncated"] = True   # needsReview 는 해시에 안 들어간다 — 벡터 note 참조
+        return K.clip_key(**kwargs)
+    raise ValueError(f"모르는 section: {section}")
+
 
 @pytest.mark.skipif(not _VECTORS.exists(), reason="공유 벡터 파일 아직 없음")
-def test_shared_vectors():
-    data = json.loads(_VECTORS.read_text(encoding="utf-8"))
-    bad = []
-    for case in data.get("cases", data if isinstance(data, list) else []):
-        want = case.get("clip_key") or case.get("expected")
-        if not want:
-            continue
-        got = K.clip_key(
-            case.get("book_key", ""),
-            case.get("type", "highlight"),
-            content=case.get("content", "") or case.get("text", "") or "",
-            page=case.get("page"),
-            loc_start=case.get("loc_start"),
-            loc_end=case.get("loc_end"),
-            source=case.get("source", "kindle"),
-            truncated=bool(case.get("truncated")),
-        )
-        if got != want:
-            bad.append((case, want, got))
-    assert not bad, f"{len(bad)}건 불일치: {bad[:3]}"
+@pytest.mark.parametrize("v", _vector_cases(), ids=lambda v: v.get("id", "?"))
+def test_shared_vector(v):
+    """`~/prj/reading_manager/fixtures/clip_key_vectors.json` — 줄줄이가 생성.
+
+    이 저장소가 고른 102건 표본과 달리, 경계값(20/19자)·색상 4종 전부·대소문자·
+    공백 유무·본문 중간 대괄호 등 **의도된 함정**을 담고 있다. 둘 다 통과해야
+    ①이 끝난다 (리딩총괄2 지시).
+    """
+    assert v.get("source") in _VECTOR_SOURCES, f"모르는 source: {v.get('source')}"
+    assert _eval_vector(v) == v["expected"]
