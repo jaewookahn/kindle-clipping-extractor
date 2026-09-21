@@ -95,6 +95,7 @@ from kindle.text_cache import (
     DEFAULT_DIR as DEFAULT_TEXT_CACHE,
 )
 from kindle.ksdk_staleness import check as check_ksdk_staleness
+from kindle.ksdk_export import parse_ksdk_export
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +627,8 @@ def run_pipeline(args) -> int:
     # (books 전체를 돌면 메타데이터 추출 비용이 들지만, ASIN 을 알아야
     #  매칭되므로 피할 수 없다.)
     pairs = [(b["kfx"], b["sdr"], b["stem"])
-             for b in (books if (args.wifi or args.ksdk_db) else with_clips)]
+             for b in (books if (args.wifi or args.ksdk_db or args.ksdk_export)
+                       else with_clips)]
     if not pairs:
         print("처리할 책이 없습니다.")
         return 0
@@ -655,21 +657,44 @@ def run_pipeline(args) -> int:
     text_cache_dir = (None if args.no_text_cache
                       else Path(args.text_cache).expanduser())
 
-    # ── 3b. KSDK 어노테이션 DB 확보 (WiFi 수신 또는 로컬 파일) ───────────
+    # ── 3b. KSDK 어노테이션 확보 (WiFi 수신 / DB 통째 / 부분 추출) ───────
     #
     # 펌웨어 5.19.x 이후 어노테이션이 .yjr 대신 기기 내부 SQLite 로 간다.
-    # 그 DB 를 받아 쓰면 사이드카가 고아화된 기기에서도 신규 클리핑을 얻는다.
     # 좌표계가 PRE-KL char offset 으로 YJR 과 같아 이후 처리는 동일하다.
+    #
+    # 세 경로 다 결국 ksdk_clips 리스트 하나로 모인다 — 그 뒤(요약 출력·
+    # staleness 검사·state 갱신)는 소스에 무관하게 공통이다. 소스별로
+    # 갈라 두면 조용히 다른 결과가 나올 위험이 있어(--ksdk-db 와
+    # --ksdk-export 가 같은 DB 를 가리켜도 clip_key 가 갈리면 안 된다 —
+    # tools/verify_ksdk_export.py 로 실측 검증됨) 공통 블록을 하나만 둔다.
     ksdk_by_asin: Optional[dict] = None
-    if args.wifi or args.ksdk_db:
-        from kindle.ksdk import parse_ksdk_db
+    if args.wifi or args.ksdk_db or args.ksdk_export:
+        source_desc: str
+        source_sha1_path: Path
 
-        if args.ksdk_db:
+        if args.ksdk_export:
+            # DB 통째가 아니라 좌표·색상·시각만 담은 TSV — tools/ksdk_extract.sh
+            # 산출물. ON_DEVICE_EXTRACT_REVIEW.md 참조. 아직 온디바이스
+            # 배포 전이라 이 경로는 사람이 손으로 받아 둔 파일을 가리킨다.
+            export_path = Path(args.ksdk_export).expanduser()
+            if not export_path.exists():
+                print(f"오류: KSDK 추출 파일 없음 — {export_path}", file=sys.stderr)
+                return 1
+            ksdk_clips = parse_ksdk_export(export_path)
+            source_desc = f"KSDK 추출(TSV): {export_path}"
+            source_sha1_path = export_path
+        elif args.ksdk_db:
+            from kindle.ksdk import parse_ksdk_db
+
             db_path = Path(args.ksdk_db).expanduser()
             if not db_path.exists():
                 print(f"오류: KSDK DB 없음 — {db_path}", file=sys.stderr)
                 return 1
+            ksdk_clips = parse_ksdk_db(db_path)
+            source_desc = f"KSDK DB: {db_path}"
+            source_sha1_path = db_path
         else:
+            from kindle.ksdk import parse_ksdk_db
             from kindle.wifi import WifiReceiver
 
             out_dir = Path(args.state).expanduser().parent / "ksdk_wifi"
@@ -710,22 +735,28 @@ def run_pipeline(args) -> int:
                          for kfx, sdr, stem in pairs]
                 print(f"  KFX {len(recv_kfx)}권 수신 — 본문은 수신본에서 추출합니다")
 
-        ksdk_clips = parse_ksdk_db(db_path)
+            ksdk_clips = parse_ksdk_db(db_path)
+            source_desc = f"KSDK DB(WiFi 수신): {db_path}"
+            source_sha1_path = db_path
+
+        # ── 공통: 소스 무관 처리 ─────────────────────────────────────────
         ksdk_by_asin = {}
         for c in ksdk_clips:
             ksdk_by_asin.setdefault(c.book_title, []).append(c)   # 제목 채우기 전엔 ASIN
-        print(f"KSDK DB: {db_path}")
+        print(source_desc)
         print(f"  클리핑 {len(ksdk_clips)}개 / 책 {len(ksdk_by_asin)}권")
 
         # staleness 방어 — 옛 사본을 새 것으로 착각해 조용히 반입하는 것을 막는다.
         # 로컬 파일 mtime 은 못 믿는다(SYMLINK_STALENESS_REVIEW.md §3 실측 —
         # WiFi PUT 은 수신 시각으로 새로 쓰고, MTP 다운로드도 원본
         # modificationdate 를 안 맞춘다). 판단 로직은 kindle/ksdk_staleness.py.
+        # --ksdk-export 도 같은 방어를 받는다 — 온디바이스 커서 저장은 아직
+        # 안 만들었지만(리딩총괄2 지시로 보류) 이 맥 쪽 검사는 소스에 무관하다.
         newest_ksdk_date = max((c.added_date for c in ksdk_clips if c.added_date),
                               default=None)
         if newest_ksdk_date:
             print(f"  최신 어노테이션: {newest_ksdk_date}")
-        ksdk_sha1 = hashlib.sha1(db_path.read_bytes()).hexdigest()
+        ksdk_sha1 = hashlib.sha1(source_sha1_path.read_bytes()).hexdigest()
         staleness = check_ksdk_staleness(state.get("last_ksdk_db"), ksdk_sha1, newest_ksdk_date)
         for w in staleness.warnings:
             print(f"  [경고] {w}")
@@ -1015,6 +1046,13 @@ def main() -> None:
                         help="WiFi 수신 제한시간 (기본값: 600초)")
     parser.add_argument("--ksdk-db", default=None, metavar="FILE",
                         help="이미 받아둔 ksdk_annotation_v1.db 를 쓴다 (수신 대기 없음)")
+    parser.add_argument("--ksdk-export", default=None, metavar="FILE",
+                        help="DB 통째 대신 tools/ksdk_extract.sh 가 만든 TSV 부분 추출본을 "
+                             "쓴다 (--ksdk-db 와 배타적으로 취급 — 함께 주면 이쪽이 우선). "
+                             "권당 좌표·색상·시각만 담겨 있어 훨씬 작다 "
+                             "(실측: DB 3.68MB → TSV 233KB). 아직 온디바이스 배포 전이라 "
+                             "사람이 직접 받아 둔 파일을 가리켜야 한다 — "
+                             "ON_DEVICE_EXTRACT_REVIEW.md 참조")
 
     # 장별 요약 (DeepSeek)
     parser.add_argument("--summarize", action="store_true",
