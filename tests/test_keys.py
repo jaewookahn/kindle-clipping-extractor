@@ -48,10 +48,14 @@ def test_normalize_content(raw, want):
     assert K.normalize_content(raw) == want
 
 
-@pytest.mark.parametrize("color", ["yellow", "blue", "pink", "orange",
-                                   "YELLOW", "Blue", "PiNk"])
+@pytest.mark.parametrize("color", [
+    "yellow", "blue", "pink", "orange", "green",       # 실측(COLOR_CENSUS.json)에 있던 것
+    "YELLOW", "Blue", "PiNk",                          # 대소문자 무시
+    "dark_blue", "light_purple", "vermillion",         # 화이트리스트가 아니라 패턴이므로
+                                                        # 목록에 없던 색도 잡혀야 한다
+])
 def test_color_tag_is_stripped(color):
-    """색을 바꿨다고 다른 클리핑이 되면 안 된다. 사양이 정한 4색, 대소문자 무시."""
+    """색을 바꿨다고, 새 색이 생겨도 다른 클리핑이 되면 안 된다."""
     assert K.normalize_content(f"[{color}] 본문입니다") == K.normalize_content("본문입니다")
 
 
@@ -64,16 +68,19 @@ def test_mid_content_brackets_are_not_treated_as_color_tags():
     assert K.normalize_content("본문 [1] 계속") == K.normalize_content("본문[1]계속")
 
 
-def test_dark_blue_is_not_in_the_spec_color_set():
-    """⚠️ 실측 불일치: KSDK DB(kindle/ksdk.py)는 실제로 "dark_blue"를 내보내는데
-    (tests/test_ksdk.py 참조) 사양(DATA_MODEL.md §7)이 정한 색상 넷은
-    yellow·blue·pink·orange 뿐이라 "dark_blue"는 포함되지 않는다. 사양을
-    임의로 늘리지 않고 그대로 따랐다 — "dark_blue" 태그는 안 벗겨진다.
+def test_numeric_footnote_at_start_is_not_stripped():
+    """"[1]"·"[2]" 같은 숫자 각주는 알파벳으로 시작하지 않아 패턴에 안 걸린다."""
+    stripped = K.normalize_content("[1] 각주로 시작하는 본문")
+    assert "1" in stripped
+
+
+def test_dark_blue_is_stripped_by_pattern():
+    """⚠️ 뒤집힌 회귀 테스트: 화이트리스트 4색(yellow·blue·pink·orange) 시절엔
+    KSDK DB(kindle/ksdk.py)가 실제로 내보내는 "dark_blue"(실측 1,632건,
+    COLOR_CENSUS.json)가 안 벗겨졌다. 화이트리스트 자체가 틀린 접근이라는
+    판단(리딩총괄2, 2026-09-20) 아래 패턴 방식으로 바꿨고, 이제는 벗겨진다.
     """
-    stripped = K.normalize_content("[dark_blue] 본문입니다")
-    bare = K.normalize_content("본문입니다")
-    assert stripped != bare
-    assert "darkblue" in stripped
+    assert K.normalize_content("[dark_blue] 본문입니다") == K.normalize_content("본문입니다")
 
 
 # --------------------------------------------------------------------------

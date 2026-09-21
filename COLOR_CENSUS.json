@@ -1,0 +1,46 @@
+{
+  "generated_by": "킨들클리핑new 세션",
+  "purpose": "실제 색상 값 전수 조사 — clip_key 색상태그 제거 패턴 검증용",
+  "by_source": {
+    "ksdk_db:live:nonsyncable_annotations": {
+      "yellow": 2207,
+      "dark_blue": 409,
+      "pink": 32,
+      "blue": 2,
+      "green": 2
+    },
+    "ksdk_db:recovered:nonsyncable_annotations": {
+      "yellow": 2207,
+      "dark_blue": 409,
+      "pink": 32,
+      "blue": 2,
+      "green": 2
+    },
+    "yjr_sidecars": {
+      "yellow": 3656,
+      "dark_blue": 646,
+      "pink": 70,
+      "blue": 8,
+      "orange": 4
+    },
+    "json_output:kindle_sync.json(Colorsoft,소실전백업)": {
+      "yellow": 138,
+      "dark_blue": 15
+    },
+    "json_output:kindle_sync_scribe.json(Scribe)": {
+      "dark_blue": 138
+    },
+    "json_output:kindle_sync.json(현재 저장소)": {
+      "yellow": 138,
+      "dark_blue": 15
+    }
+  },
+  "all_colors": {
+    "yellow": 8346,
+    "dark_blue": 1632,
+    "pink": 134,
+    "blue": 12,
+    "green": 4,
+    "orange": 4
+  }
+}
